@@ -29,10 +29,21 @@ interface TopicEntry {
   description?: string;
   /** Optional aliases — extra topic names that resolve to this entry. */
   aliases?: string[];
+  /** Optional category id (matches a key in registry.categories). */
+  category?: string;
+}
+
+interface CategoryMeta {
+  /** Display label shown to agents. */
+  name: string;
+  /** Optional sort order (lower comes first). */
+  order?: number;
 }
 
 interface TopicRegistry {
   topics: Record<string, TopicEntry>;
+  /** Optional category metadata — id → display label + order. */
+  categories?: Record<string, CategoryMeta>;
 }
 
 interface PluginConfig {
@@ -160,6 +171,8 @@ interface ResolvedRegistry {
   aliasIndex: Map<string, string>;
   /** Sorted list of canonical names for stable enumeration. */
   names: string[];
+  /** Category id → meta (label + order). */
+  categories: Record<string, CategoryMeta>;
   /** Source file path (for diagnostics). */
   sourcePath: string;
 }
@@ -170,6 +183,7 @@ function loadRegistry(workspaceRoot: string, topicsFile: string): ResolvedRegist
     byName: new Map(),
     aliasIndex: new Map(),
     names: [],
+    categories: {},
     sourcePath: path,
   };
   if (!existsSync(path)) {
@@ -211,6 +225,7 @@ function loadRegistry(workspaceRoot: string, topicsFile: string): ResolvedRegist
     byName,
     aliasIndex,
     names: [...byName.keys()].sort(),
+    categories: parsed.categories ?? {},
     sourcePath: path,
   };
 }
@@ -226,22 +241,23 @@ function resolveTopic(reg: ResolvedRegistry, query: string): { name: string; ent
   return null;
 }
 
+/**
+ * Short tool description — does NOT enumerate topics. Agent calls
+ * list_topics on demand. Saves ~25 lines × every-turn × every-agent.
+ */
 function buildToolDescription(reg: ResolvedRegistry, toolName: string): string {
   if (reg.names.length === 0) {
-    return `Look up topic-indexed reference content on demand. Topic registry currently empty (expected at ${reg.sourcePath}). Call ${toolName}({list_topics:true}) once it is populated.`;
+    return `按需查詢主題化參考內容。Topic registry 目前為空（預期路徑：${reg.sourcePath}）。等填入後 call ${toolName}({list_topics:true}) 看清單。`;
   }
-  const lines: string[] = [
-    `Look up topic-indexed reference content (shared docs, tool guides, etc.) on demand.`,
-    `Call ${toolName}({topic:"<name>"}) to fetch a topic. Pass {list_topics:true} to enumerate. Pass {section:"<heading>"} to slice by heading; {list_sections:true} to see headings only.`,
+  return [
+    `按需查詢主題化參考內容（shared 文件、工具用法、流程細節）。共 ${reg.names.length} 個 topic，依分類組織。`,
     ``,
-    `Available topics:`,
-  ];
-  for (const name of reg.names) {
-    const entry = reg.byName.get(name)!;
-    const desc = entry.description ? ` — ${entry.description}` : "";
-    lines.push(`- ${name}${desc}`);
-  }
-  return lines.join("\n");
+    `用法：`,
+    `- 不知道有哪些 topic → ${toolName}({list_topics:true}) 看分類清單`,
+    `- 知道 topic 名 → ${toolName}({topic:"<name>"})`,
+    `- 大檔想看局部 → ${toolName}({topic, list_sections:true}) 找標題 → ${toolName}({topic, section:"<heading>"})`,
+    `- 找不到 topic：先 list_topics 看完整清單，不要憑記憶猜（topic 命名隨整理會變）`,
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -323,19 +339,33 @@ export default function register(api: OpenClawApi): void {
         return { error: `context_lookup is disabled for agent '${agentId}'` };
       }
 
-      // Enumerate topics
+      // Enumerate topics (grouped by category)
       if (p.list_topics) {
+        const groups: Record<string, Array<Record<string, unknown>>> = {};
+        for (const name of registry.names) {
+          const entry = registry.byName.get(name)!;
+          const cat = entry.category ?? "uncategorized";
+          if (!groups[cat]) groups[cat] = [];
+          groups[cat].push({
+            name,
+            description: entry.description ?? null,
+            default_section: entry.section ?? null,
+            aliases: entry.aliases ?? [],
+          });
+        }
+        const catIds = Object.keys(groups).sort((a, b) => {
+          const oa = registry.categories[a]?.order ?? 999;
+          const ob = registry.categories[b]?.order ?? 999;
+          if (oa !== ob) return oa - ob;
+          return a.localeCompare(b);
+        });
         return {
-          topics: registry.names.map((name) => {
-            const entry = registry.byName.get(name)!;
-            return {
-              name,
-              description: entry.description ?? null,
-              file: entry.file,
-              default_section: entry.section ?? null,
-              aliases: entry.aliases ?? [],
-            };
-          }),
+          categories: catIds.map((id) => ({
+            id,
+            name: registry.categories[id]?.name ?? id,
+            topics: groups[id],
+          })),
+          total: registry.names.length,
         };
       }
 

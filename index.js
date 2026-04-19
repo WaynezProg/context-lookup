@@ -94,6 +94,7 @@ function loadRegistry(workspaceRoot, topicsFile) {
     byName: /* @__PURE__ */ new Map(),
     aliasIndex: /* @__PURE__ */ new Map(),
     names: [],
+    categories: {},
     sourcePath: path
   };
   if (!(0, import_fs.existsSync)(path)) {
@@ -135,6 +136,7 @@ function loadRegistry(workspaceRoot, topicsFile) {
     byName,
     aliasIndex,
     names: [...byName.keys()].sort(),
+    categories: parsed.categories ?? {},
     sourcePath: path
   };
 }
@@ -150,20 +152,17 @@ function resolveTopic(reg, query) {
 }
 function buildToolDescription(reg, toolName) {
   if (reg.names.length === 0) {
-    return `Look up topic-indexed reference content on demand. Topic registry currently empty (expected at ${reg.sourcePath}). Call ${toolName}({list_topics:true}) once it is populated.`;
+    return `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\u3002Topic registry \u76EE\u524D\u70BA\u7A7A\uFF08\u9810\u671F\u8DEF\u5F91\uFF1A${reg.sourcePath}\uFF09\u3002\u7B49\u586B\u5165\u5F8C call ${toolName}({list_topics:true}) \u770B\u6E05\u55AE\u3002`;
   }
-  const lines = [
-    `Look up topic-indexed reference content (shared docs, tool guides, etc.) on demand.`,
-    `Call ${toolName}({topic:"<name>"}) to fetch a topic. Pass {list_topics:true} to enumerate. Pass {section:"<heading>"} to slice by heading; {list_sections:true} to see headings only.`,
+  return [
+    `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\uFF08shared \u6587\u4EF6\u3001\u5DE5\u5177\u7528\u6CD5\u3001\u6D41\u7A0B\u7D30\u7BC0\uFF09\u3002\u5171 ${reg.names.length} \u500B topic\uFF0C\u4F9D\u5206\u985E\u7D44\u7E54\u3002`,
     ``,
-    `Available topics:`
-  ];
-  for (const name of reg.names) {
-    const entry = reg.byName.get(name);
-    const desc = entry.description ? ` \u2014 ${entry.description}` : "";
-    lines.push(`- ${name}${desc}`);
-  }
-  return lines.join("\n");
+    `\u7528\u6CD5\uFF1A`,
+    `- \u4E0D\u77E5\u9053\u6709\u54EA\u4E9B topic \u2192 ${toolName}({list_topics:true}) \u770B\u5206\u985E\u6E05\u55AE`,
+    `- \u77E5\u9053 topic \u540D \u2192 ${toolName}({topic:"<name>"})`,
+    `- \u5927\u6A94\u60F3\u770B\u5C40\u90E8 \u2192 ${toolName}({topic, list_sections:true}) \u627E\u6A19\u984C \u2192 ${toolName}({topic, section:"<heading>"})`,
+    `- \u627E\u4E0D\u5230 topic\uFF1A\u5148 list_topics \u770B\u5B8C\u6574\u6E05\u55AE\uFF0C\u4E0D\u8981\u6191\u8A18\u61B6\u731C\uFF08topic \u547D\u540D\u96A8\u6574\u7406\u6703\u8B8A\uFF09`
+  ].join("\n");
 }
 function register(api) {
   const anyApi = api;
@@ -213,17 +212,31 @@ function register(api) {
         return { error: `context_lookup is disabled for agent '${agentId}'` };
       }
       if (p.list_topics) {
+        const groups = {};
+        for (const name2 of registry.names) {
+          const entry2 = registry.byName.get(name2);
+          const cat = entry2.category ?? "uncategorized";
+          if (!groups[cat]) groups[cat] = [];
+          groups[cat].push({
+            name: name2,
+            description: entry2.description ?? null,
+            default_section: entry2.section ?? null,
+            aliases: entry2.aliases ?? []
+          });
+        }
+        const catIds = Object.keys(groups).sort((a, b) => {
+          const oa = registry.categories[a]?.order ?? 999;
+          const ob = registry.categories[b]?.order ?? 999;
+          if (oa !== ob) return oa - ob;
+          return a.localeCompare(b);
+        });
         return {
-          topics: registry.names.map((name2) => {
-            const entry2 = registry.byName.get(name2);
-            return {
-              name: name2,
-              description: entry2.description ?? null,
-              file: entry2.file,
-              default_section: entry2.section ?? null,
-              aliases: entry2.aliases ?? []
-            };
-          })
+          categories: catIds.map((id) => ({
+            id,
+            name: registry.categories[id]?.name ?? id,
+            topics: groups[id]
+          })),
+          total: registry.names.length
         };
       }
       if (!p.topic || typeof p.topic !== "string") {
