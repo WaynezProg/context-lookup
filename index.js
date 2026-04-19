@@ -80,10 +80,10 @@ function log(msg) {
 function warn(msg) {
   console.log(`[context-lookup] WARN: ${msg}`);
 }
-function resolveDefaultWorkspaceRoot() {
+function resolveOpenClawDefaultWorkspaceRoot() {
   const env = process.env;
   const home = env.HOME || env.USERPROFILE;
-  if (!home) return process.cwd();
+  if (!home) return null;
   const profile = env.OPENCLAW_PROFILE?.trim();
   const sub = profile && profile.toLowerCase() !== "default" ? `workspace-${profile}` : "workspace";
   return (0, import_path.join)(home, ".openclaw", sub);
@@ -150,32 +150,57 @@ function resolveTopic(reg, query) {
   }
   return null;
 }
-function buildToolDescription(reg, toolName) {
-  if (reg.names.length === 0) {
-    return `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\u3002Topic registry \u76EE\u524D\u70BA\u7A7A\uFF08\u9810\u671F\u8DEF\u5F91\uFF1A${reg.sourcePath}\uFF09\u3002\u7B49\u586B\u5165\u5F8C call ${toolName}({list_topics:true}) \u770B\u6E05\u55AE\u3002`;
+var TOOL_DESCRIPTIONS = {
+  en: {
+    empty: (sourcePath, toolName) => `Look up topic-indexed reference content on demand. Topic registry is empty (expected at ${sourcePath}). Once populated, call ${toolName}({list_topics:true}) to see the list.`,
+    populated: (n, toolName) => [
+      `Look up topic-indexed reference content (shared docs, tool guides, workflow details) on demand. ${n} topics organized by category.`,
+      ``,
+      `Usage:`,
+      `- Don't know what's available \u2192 ${toolName}({list_topics:true}) returns the categorized list`,
+      `- Know the topic name \u2192 ${toolName}({topic:"<name>"})`,
+      `- Large file, want a slice \u2192 ${toolName}({topic, list_sections:true}) to see headings \u2192 ${toolName}({topic, section:"<heading>"})`,
+      `- Topic not found: call list_topics for the canonical names. Don't guess from memory (names change as the registry is reorganised).`
+    ]
+  },
+  "zh-TW": {
+    empty: (sourcePath, toolName) => `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\u3002Topic registry \u76EE\u524D\u70BA\u7A7A\uFF08\u9810\u671F\u8DEF\u5F91\uFF1A${sourcePath}\uFF09\u3002\u7B49\u586B\u5165\u5F8C call ${toolName}({list_topics:true}) \u770B\u6E05\u55AE\u3002`,
+    populated: (n, toolName) => [
+      `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\uFF08shared \u6587\u4EF6\u3001\u5DE5\u5177\u7528\u6CD5\u3001\u6D41\u7A0B\u7D30\u7BC0\uFF09\u3002\u5171 ${n} \u500B topic\uFF0C\u4F9D\u5206\u985E\u7D44\u7E54\u3002`,
+      ``,
+      `\u7528\u6CD5\uFF1A`,
+      `- \u4E0D\u77E5\u9053\u6709\u54EA\u4E9B topic \u2192 ${toolName}({list_topics:true}) \u770B\u5206\u985E\u6E05\u55AE`,
+      `- \u77E5\u9053 topic \u540D \u2192 ${toolName}({topic:"<name>"})`,
+      `- \u5927\u6A94\u60F3\u770B\u5C40\u90E8 \u2192 ${toolName}({topic, list_sections:true}) \u627E\u6A19\u984C \u2192 ${toolName}({topic, section:"<heading>"})`,
+      `- \u627E\u4E0D\u5230 topic\uFF1A\u5148 list_topics \u770B\u5B8C\u6574\u6E05\u55AE\uFF0C\u4E0D\u8981\u6191\u8A18\u61B6\u731C\uFF08topic \u547D\u540D\u96A8\u6574\u7406\u6703\u8B8A\uFF09`
+    ]
   }
-  return [
-    `\u6309\u9700\u67E5\u8A62\u4E3B\u984C\u5316\u53C3\u8003\u5167\u5BB9\uFF08shared \u6587\u4EF6\u3001\u5DE5\u5177\u7528\u6CD5\u3001\u6D41\u7A0B\u7D30\u7BC0\uFF09\u3002\u5171 ${reg.names.length} \u500B topic\uFF0C\u4F9D\u5206\u985E\u7D44\u7E54\u3002`,
-    ``,
-    `\u7528\u6CD5\uFF1A`,
-    `- \u4E0D\u77E5\u9053\u6709\u54EA\u4E9B topic \u2192 ${toolName}({list_topics:true}) \u770B\u5206\u985E\u6E05\u55AE`,
-    `- \u77E5\u9053 topic \u540D \u2192 ${toolName}({topic:"<name>"})`,
-    `- \u5927\u6A94\u60F3\u770B\u5C40\u90E8 \u2192 ${toolName}({topic, list_sections:true}) \u627E\u6A19\u984C \u2192 ${toolName}({topic, section:"<heading>"})`,
-    `- \u627E\u4E0D\u5230 topic\uFF1A\u5148 list_topics \u770B\u5B8C\u6574\u6E05\u55AE\uFF0C\u4E0D\u8981\u6191\u8A18\u61B6\u731C\uFF08topic \u547D\u540D\u96A8\u6574\u7406\u6703\u8B8A\uFF09`
-  ].join("\n");
+};
+function buildToolDescription(reg, toolName, locale) {
+  const tmpl = TOOL_DESCRIPTIONS[locale] ?? TOOL_DESCRIPTIONS.en;
+  if (reg.names.length === 0) return tmpl.empty(reg.sourcePath, toolName);
+  return tmpl.populated(reg.names.length, toolName).join("\n");
 }
 function register(api) {
   const anyApi = api;
   const config = anyApi.pluginConfig ?? (anyApi.id && anyApi.config?.plugins?.entries?.[anyApi.id]?.config) ?? api.getConfig?.() ?? {};
-  const rawWorkspaceRoot = anyApi.runtime?.workspaceRoot ?? api.getWorkspaceRoot?.() ?? null;
-  const workspaceRoot = rawWorkspaceRoot && rawWorkspaceRoot !== "/" ? rawWorkspaceRoot : resolveDefaultWorkspaceRoot();
+  const hostWorkspaceRoot = anyApi.runtime?.workspaceRoot ?? api.getWorkspaceRoot?.() ?? null;
+  const validHostRoot = hostWorkspaceRoot && hostWorkspaceRoot !== "/" ? hostWorkspaceRoot : null;
+  const workspaceRoot = validHostRoot ?? (config.workspaceRoot && (0, import_path.isAbsolute)(config.workspaceRoot) ? config.workspaceRoot : null) ?? resolveOpenClawDefaultWorkspaceRoot();
+  if (!workspaceRoot) {
+    warn(
+      "no workspaceRoot resolved \u2014 host did not provide one, plugin config has none, and OpenClaw default could not be derived (HOME/USERPROFILE unset). Set `workspaceRoot` in this plugin's config or run under a host that provides it."
+    );
+    return;
+  }
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
   const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
+  const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
   const registry = loadRegistry(workspaceRoot, topicsFile);
   log(
-    `v1.0 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}`
+    `v1.2 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}`
   );
   if (typeof api.registerTool !== "function") {
     warn("registerTool not available on this host \u2014 plugin disabled");
@@ -183,7 +208,7 @@ function register(api) {
   }
   api.registerTool({
     name: toolName,
-    description: buildToolDescription(registry, toolName),
+    description: buildToolDescription(registry, toolName, locale),
     parameters: {
       type: "object",
       properties: {

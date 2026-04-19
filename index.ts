@@ -51,6 +51,13 @@ interface PluginConfig {
   toolName?: string;
   maxBytes?: number;
   skipAgents?: string[];
+  /** Tool description language. "en" (default) or "zh-TW". */
+  locale?: "en" | "zh-TW";
+  /**
+   * Workspace root (absolute path). Required when the host does not
+   * provide one via `api.runtime.workspaceRoot` or `api.getWorkspaceRoot()`.
+   */
+  workspaceRoot?: string;
 }
 
 interface ToolParams {
@@ -151,10 +158,15 @@ function warn(msg: string): void {
   console.log(`[context-lookup] WARN: ${msg}`);
 }
 
-function resolveDefaultWorkspaceRoot(): string {
+/**
+ * Mirror of OpenClaw core's default workspace location, used as a final
+ * fallback when neither the host API nor plugin config provides one.
+ * Honors `OPENCLAW_PROFILE` like core does.
+ */
+function resolveOpenClawDefaultWorkspaceRoot(): string | null {
   const env = process.env;
   const home = env.HOME || env.USERPROFILE;
-  if (!home) return process.cwd();
+  if (!home) return null;
   const profile = env.OPENCLAW_PROFILE?.trim();
   const sub = profile && profile.toLowerCase() !== "default" ? `workspace-${profile}` : "workspace";
   return join(home, ".openclaw", sub);
@@ -241,23 +253,45 @@ function resolveTopic(reg: ResolvedRegistry, query: string): { name: string; ent
   return null;
 }
 
+type Locale = "en" | "zh-TW";
+
+const TOOL_DESCRIPTIONS: Record<Locale, { empty: (sourcePath: string, toolName: string) => string; populated: (n: number, toolName: string) => string[] }> = {
+  en: {
+    empty: (sourcePath, toolName) =>
+      `Look up topic-indexed reference content on demand. Topic registry is empty (expected at ${sourcePath}). Once populated, call ${toolName}({list_topics:true}) to see the list.`,
+    populated: (n, toolName) => [
+      `Look up topic-indexed reference content (shared docs, tool guides, workflow details) on demand. ${n} topics organized by category.`,
+      ``,
+      `Usage:`,
+      `- Don't know what's available → ${toolName}({list_topics:true}) returns the categorized list`,
+      `- Know the topic name → ${toolName}({topic:"<name>"})`,
+      `- Large file, want a slice → ${toolName}({topic, list_sections:true}) to see headings → ${toolName}({topic, section:"<heading>"})`,
+      `- Topic not found: call list_topics for the canonical names. Don't guess from memory (names change as the registry is reorganised).`,
+    ],
+  },
+  "zh-TW": {
+    empty: (sourcePath, toolName) =>
+      `按需查詢主題化參考內容。Topic registry 目前為空（預期路徑：${sourcePath}）。等填入後 call ${toolName}({list_topics:true}) 看清單。`,
+    populated: (n, toolName) => [
+      `按需查詢主題化參考內容（shared 文件、工具用法、流程細節）。共 ${n} 個 topic，依分類組織。`,
+      ``,
+      `用法：`,
+      `- 不知道有哪些 topic → ${toolName}({list_topics:true}) 看分類清單`,
+      `- 知道 topic 名 → ${toolName}({topic:"<name>"})`,
+      `- 大檔想看局部 → ${toolName}({topic, list_sections:true}) 找標題 → ${toolName}({topic, section:"<heading>"})`,
+      `- 找不到 topic：先 list_topics 看完整清單，不要憑記憶猜（topic 命名隨整理會變）`,
+    ],
+  },
+};
+
 /**
  * Short tool description — does NOT enumerate topics. Agent calls
  * list_topics on demand. Saves ~25 lines × every-turn × every-agent.
  */
-function buildToolDescription(reg: ResolvedRegistry, toolName: string): string {
-  if (reg.names.length === 0) {
-    return `按需查詢主題化參考內容。Topic registry 目前為空（預期路徑：${reg.sourcePath}）。等填入後 call ${toolName}({list_topics:true}) 看清單。`;
-  }
-  return [
-    `按需查詢主題化參考內容（shared 文件、工具用法、流程細節）。共 ${reg.names.length} 個 topic，依分類組織。`,
-    ``,
-    `用法：`,
-    `- 不知道有哪些 topic → ${toolName}({list_topics:true}) 看分類清單`,
-    `- 知道 topic 名 → ${toolName}({topic:"<name>"})`,
-    `- 大檔想看局部 → ${toolName}({topic, list_sections:true}) 找標題 → ${toolName}({topic, section:"<heading>"})`,
-    `- 找不到 topic：先 list_topics 看完整清單，不要憑記憶猜（topic 命名隨整理會變）`,
-  ].join("\n");
+function buildToolDescription(reg: ResolvedRegistry, toolName: string, locale: Locale): string {
+  const tmpl = TOOL_DESCRIPTIONS[locale] ?? TOOL_DESCRIPTIONS.en;
+  if (reg.names.length === 0) return tmpl.empty(reg.sourcePath, toolName);
+  return tmpl.populated(reg.names.length, toolName).join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -281,23 +315,35 @@ export default function register(api: OpenClawApi): void {
     ?? api.getConfig?.()
     ?? {};
 
-  const rawWorkspaceRoot =
-    anyApi.runtime?.workspaceRoot
-    ?? api.getWorkspaceRoot?.()
-    ?? null;
-
+  // workspaceRoot resolution order:
+  //   1. host runtime (api.runtime.workspaceRoot) — preferred
+  //   2. legacy host method (api.getWorkspaceRoot())
+  //   3. plugin config (config.workspaceRoot) — explicit override
+  //   4. OpenClaw default (~/.openclaw/workspace, honors OPENCLAW_PROFILE) — last-resort
+  const hostWorkspaceRoot = anyApi.runtime?.workspaceRoot ?? api.getWorkspaceRoot?.() ?? null;
+  const validHostRoot = hostWorkspaceRoot && hostWorkspaceRoot !== "/" ? hostWorkspaceRoot : null;
   const workspaceRoot =
-    rawWorkspaceRoot && rawWorkspaceRoot !== "/" ? rawWorkspaceRoot : resolveDefaultWorkspaceRoot();
+    validHostRoot
+    ?? (config.workspaceRoot && isAbsolute(config.workspaceRoot) ? config.workspaceRoot : null)
+    ?? resolveOpenClawDefaultWorkspaceRoot();
+
+  if (!workspaceRoot) {
+    warn(
+      "no workspaceRoot resolved — host did not provide one, plugin config has none, and OpenClaw default could not be derived (HOME/USERPROFILE unset). Set `workspaceRoot` in this plugin's config or run under a host that provides it.",
+    );
+    return;
+  }
 
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
   const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
+  const locale: Locale = config.locale === "zh-TW" ? "zh-TW" : "en";
 
   const registry = loadRegistry(workspaceRoot, topicsFile);
 
   log(
-    `v1.0 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}`,
+    `v1.2 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}`,
   );
 
   if (typeof api.registerTool !== "function") {
@@ -307,7 +353,7 @@ export default function register(api: OpenClawApi): void {
 
   api.registerTool({
     name: toolName,
-    description: buildToolDescription(registry, toolName),
+    description: buildToolDescription(registry, toolName, locale),
     parameters: {
       type: "object",
       properties: {

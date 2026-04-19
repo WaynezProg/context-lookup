@@ -1,0 +1,63 @@
+{
+  "_readme": {
+    "purpose": "Example topic registry for the context-lookup plugin. Copy to <workspace>/topics.json and edit.",
+    "schema": {
+      "categories.<id>.name": "Display label shown in list_topics output.",
+      "categories.<id>.order": "Optional integer for sort order (lower = first).",
+      "topics.<name>.file": "Required. Path relative to workspace root, or absolute.",
+      "topics.<name>.section": "Optional. Default heading substring to slice (case-insensitive).",
+      "topics.<name>.description": "Optional but recommended. Shown when an agent calls list_topics.",
+      "topics.<name>.aliases": "Optional. Extra names that resolve to this topic.",
+      "topics.<name>.category": "Optional. Category id to group under in list_topics output."
+    },
+    "notes": [
+      "Edit freely — the plugin reads at startup. Restart the host (e.g. OpenClaw gateway) after changes.",
+      "Topic naming: prefer kebab-case nouns (e.g. 'git-conventions', 'deployment-runbook'). Keep names short.",
+      "The _readme key is ignored by the plugin."
+    ]
+  },
+  "categories": {
+    "common-rules": { "name": "Common rules (every agent)", "order": 1 },
+    "workflows":    { "name": "Workflows",                    "order": 2 },
+    "tools":        { "name": "Tool references",              "order": 3 }
+  },
+  "topics": {
+    "git-conventions": {
+      "file": "shared/git-conventions.md",
+      "category": "common-rules",
+      "description": "Branch naming, commit message format, PR review checklist"
+    },
+    "security-baseline": {
+      "file": "shared/security-baseline.md",
+      "category": "common-rules",
+      "description": "Secret handling, dependency audit policy, threat-modelling triggers"
+    },
+    "code-review-checklist": {
+      "file": "shared/code-review.md",
+      "section": "Checklist",
+      "category": "common-rules",
+      "description": "Standard items to check on every pull request (the Checklist section of code-review.md)"
+    },
+    "deployment-runbook": {
+      "file": "shared/deployment.md",
+      "category": "workflows",
+      "description": "Standard deploy procedure: pre-flight, rollout stages, rollback triggers",
+      "aliases": ["deploy", "release-process"]
+    },
+    "incident-response": {
+      "file": "shared/incident-response.md",
+      "category": "workflows",
+      "description": "On-call playbook: triage steps, severity ladder, comms templates"
+    },
+    "database-conventions": {
+      "file": "shared/database.md",
+      "category": "tools",
+      "description": "Schema migration rules, index policy, backup/restore procedures"
+    },
+    "testing-conventions": {
+      "file": "shared/testing.md",
+      "category": "tools",
+      "description": "Test pyramid expectations, naming, fixture handling"
+    }
+  }
+}

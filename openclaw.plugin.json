@@ -1,15 +1,15 @@
 {
   "id": "context-lookup",
   "name": "Context Lookup",
-  "version": "1.0.0",
-  "description": "Registers a single function-call style tool `context_lookup` that lets agents fetch shared context, tool docs, and topic-indexed knowledge on demand. Replaces the auto-injection model of progressive-context with an explicit, agent-driven query model.",
+  "version": "1.2.0",
+  "description": "Registers a single function-call style tool `context_lookup` that lets agents fetch shared context, tool docs, and topic-indexed knowledge on demand. No auto-injection; agents query by topic name. Tool description is locale-aware (en/zh-TW) and stays short — agents call list_topics on demand.",
   "entry": "./index.js",
   "configSchema": {
     "type": "object",
     "properties": {
       "topicsFile": {
         "type": "string",
-        "description": "Path to the topic registry JSON file, relative to workspace root. Defaults to 'topics.json'."
+        "description": "Path to the topic registry JSON file, relative to workspace root (or absolute). Defaults to 'topics.json'."
       },
       "toolName": {
         "type": "string",
@@ -23,6 +23,15 @@
         "type": "array",
         "items": { "type": "string" },
         "description": "Agent IDs to skip — the tool will not be registered for these agents."
+      },
+      "locale": {
+        "type": "string",
+        "enum": ["en", "zh-TW"],
+        "description": "Tool description language. 'en' (default) or 'zh-TW'."
+      },
+      "workspaceRoot": {
+        "type": "string",
+        "description": "Absolute path to workspace root. Only needed if the host does not supply one via api.runtime.workspaceRoot or api.getWorkspaceRoot(). Falls back to ~/.openclaw/workspace (honors OPENCLAW_PROFILE) as last resort."
       }
     },
     "additionalProperties": false

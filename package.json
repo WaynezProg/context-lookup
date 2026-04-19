@@ -1,6 +1,6 @@
 {
   "name": "context-lookup",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "OpenClaw plugin: function-call style on-demand context lookup tool. Replaces auto-injection with explicit topic queries.",
   "type": "commonjs",
   "main": "./index.js",
