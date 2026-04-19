@@ -1,0 +1,30 @@
+{
+  "id": "context-lookup",
+  "name": "Context Lookup",
+  "version": "1.0.0",
+  "description": "Registers a single function-call style tool `context_lookup` that lets agents fetch shared context, tool docs, and topic-indexed knowledge on demand. Replaces the auto-injection model of progressive-context with an explicit, agent-driven query model.",
+  "entry": "./index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "topicsFile": {
+        "type": "string",
+        "description": "Path to the topic registry JSON file, relative to workspace root. Defaults to 'topics.json'."
+      },
+      "toolName": {
+        "type": "string",
+        "description": "Override the registered tool name. Defaults to 'context_lookup'."
+      },
+      "maxBytes": {
+        "type": "number",
+        "description": "Maximum bytes returned per lookup. Files larger than this are truncated with a note. Defaults to 64000."
+      },
+      "skipAgents": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Agent IDs to skip — the tool will not be registered for these agents."
+      }
+    },
+    "additionalProperties": false
+  }
+}
