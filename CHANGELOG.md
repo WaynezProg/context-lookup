@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-07-11
+
+### Added
+- Optional deterministic prompt triggers that inject only a topic's default
+  section instead of the full reference file.
+- Privacy-safe JSONL telemetry for auto-routes, manual lookups, and recognized
+  writes that occur without route context.
+- Substring-based topic suggestions for near-miss lookup names.
+- Optional limited blocking for recognized new destinations when
+  `observeOnly` is explicitly disabled; existing project edits and opaque
+  shell commands remain unblocked.
+
+### Changed
+- Startup logs are debug-gated; warnings use stderr.
+- Plugin manifest declares startup activation and the `context_lookup` tool
+  contract explicitly.
+
 ## [1.2.0] — 2026-04-19
 
 ### Added

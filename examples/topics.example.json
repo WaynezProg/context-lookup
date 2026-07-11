@@ -8,6 +8,7 @@
       "topics.<name>.section": "Optional. Default heading substring to slice (case-insensitive).",
       "topics.<name>.description": "Optional but recommended. Shown when an agent calls list_topics.",
       "topics.<name>.aliases": "Optional. Extra names that resolve to this topic.",
+      "topics.<name>.triggers": "Optional. Literal prompt fragments used when conditional routing is enabled.",
       "topics.<name>.category": "Optional. Category id to group under in list_topics output."
     },
     "notes": [
@@ -42,7 +43,8 @@
       "file": "shared/deployment.md",
       "category": "workflows",
       "description": "Standard deploy procedure: pre-flight, rollout stages, rollback triggers",
-      "aliases": ["deploy", "release-process"]
+      "aliases": ["deploy", "release-process"],
+      "triggers": ["deploy", "release", "rollout"]
     },
     "incident-response": {
       "file": "shared/incident-response.md",
