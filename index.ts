@@ -79,7 +79,13 @@ interface ToolParams {
 
 interface ToolContext {
   agentId?: string;
+  workspaceDir?: string;
   [key: string]: unknown;
+}
+
+interface AgentToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
 }
 
 type RoutingEvent = {
@@ -93,12 +99,13 @@ type RoutingEvent = {
 };
 
 interface OpenClawApi {
-  registerTool(def: {
+  registerTool(def: ((ctx: ToolContext) => {
     name: string;
+    label: string;
     description: string;
     parameters: Record<string, unknown>;
-    execute: (params: unknown, ctx: unknown) => Promise<unknown>;
-  }): void;
+    execute: (toolCallId: string, params: unknown) => Promise<AgentToolResult>;
+  })): void;
   on?(
     name: "before_prompt_build" | "before_tool_call" | "after_tool_call",
     handler: (event: unknown, ctx: unknown) => unknown,
@@ -499,7 +506,7 @@ export default function register(api: OpenClawApi): void {
     return;
   }
 
-  api.registerTool({
+  const lookupTool = {
     name: toolName,
     description: buildToolDescription(registry, toolName, locale),
     parameters: {
@@ -608,7 +615,21 @@ export default function register(api: OpenClawApi): void {
       if (truncated) result.truncated = true;
       return result;
     },
-  });
+  };
+
+  api.registerTool((toolCtx: ToolContext) => ({
+    name: lookupTool.name,
+    label: "Context Lookup",
+    description: lookupTool.description,
+    parameters: lookupTool.parameters,
+    execute: async (_toolCallId: string, params: unknown): Promise<AgentToolResult> => {
+      const details = await lookupTool.execute(params, toolCtx) as Record<string, unknown>;
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details,
+      };
+    },
+  }));
 
   if (routingEnabled && typeof api.on === "function") {
     api.on(
@@ -656,8 +677,11 @@ export default function register(api: OpenClawApi): void {
       const params = ev.params ?? {};
       if (params.list_topics === true || params.list_sections === true) return;
       if (typeof params.topic !== "string") return;
-      const result = ev.result as { error?: unknown } | undefined;
-      if (typeof result?.error === "string") return;
+      const result = ev.result as {
+        error?: unknown;
+        details?: { error?: unknown };
+      } | undefined;
+      if (typeof result?.error === "string" || typeof result?.details?.error === "string") return;
       const resolved = resolveTopic(registry, params.topic);
       if (!resolved) return;
       const cx = ctx as { agentId?: string; runId?: string };

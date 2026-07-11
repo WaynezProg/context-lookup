@@ -44,7 +44,11 @@ function createHarness(pluginConfig = {}) {
   const api = {
     pluginConfig,
     getWorkspaceRoot: () => root,
-    registerTool: (definition) => { tool = definition; },
+    registerTool: (definition) => {
+      tool = typeof definition === "function"
+        ? definition({ agentId: "main", workspaceDir: root })
+        : definition;
+    },
     on: (name, handler) => { hooks[name] = handler; },
   };
   register(api);
@@ -58,22 +62,27 @@ function createHarness(pluginConfig = {}) {
   };
 }
 
+async function executeTool(harness, params) {
+  return harness.tool.execute("test-call", params, undefined, undefined, {});
+}
+
+function detailsOf(result) {
+  assert.ok(Array.isArray(result.content), "tool result content must use the OpenClaw block-array contract");
+  assert.equal(result.content[0]?.type, "text");
+  assert.equal(typeof result.content[0]?.text, "string");
+  return result.details;
+}
+
 async function testDefaultSectionAndSuggestion() {
   const harness = createHarness();
   try {
-    const aliasResult = await harness.tool.execute(
-      { topic: "placement" },
-      { agentId: "main", runId: "run-alias" },
-    );
+    const aliasResult = detailsOf(await executeTool(harness, { topic: "placement" }));
     assert.equal(aliasResult.topic, "file-placement");
     assert.equal(aliasResult.section, "快速決策");
     assert.match(aliasResult.content, /TMP_DEFAULT/);
     assert.doesNotMatch(aliasResult.content, /FULL_ONLY/);
 
-    const unknown = await harness.tool.execute(
-      { topic: "file-place" },
-      { agentId: "main", runId: "run-unknown" },
-    );
+    const unknown = detailsOf(await executeTool(harness, { topic: "file-place" }));
     assert.match(unknown.error, /Did you mean: file-placement/);
   } finally {
     harness.cleanup();
@@ -134,10 +143,7 @@ async function testObserveOnlyTelemetry() {
       "function",
       "after_tool_call hook should associate manual lookup with the active run",
     );
-    const lookupResult = await harness.tool.execute(
-      { topic: "file-placement" },
-      { agentId: "main", sessionId: "session-lookup" },
-    );
+    const lookupResult = await executeTool(harness, { topic: "file-placement" });
     harness.hooks.after_tool_call(
       {
         toolName: "context_lookup",

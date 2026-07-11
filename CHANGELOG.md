@@ -22,6 +22,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract explicitly.
 
 ### Fixed
+- Registered `context_lookup` through OpenClaw's per-run tool factory and now
+  return the required content-block result shape, preventing live tool calls
+  from failing in the Codex harness.
 - Manual lookups now bind to the active run through `after_tool_call`, matching
   OpenClaw's real tool context contract.
 - Replaced restricted `agent_end` cleanup with a 128-run, 30-minute bounded

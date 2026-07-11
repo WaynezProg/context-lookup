@@ -311,7 +311,7 @@ function register(api) {
     warn("registerTool not available on this host \u2014 plugin disabled");
     return;
   }
-  api.registerTool({
+  const lookupTool = {
     name: toolName,
     description: buildToolDescription(registry, toolName, locale),
     parameters: {
@@ -408,7 +408,20 @@ function register(api) {
       if (truncated) result.truncated = true;
       return result;
     }
-  });
+  };
+  api.registerTool((toolCtx) => ({
+    name: lookupTool.name,
+    label: "Context Lookup",
+    description: lookupTool.description,
+    parameters: lookupTool.parameters,
+    execute: async (_toolCallId, params) => {
+      const details = await lookupTool.execute(params, toolCtx);
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details
+      };
+    }
+  }));
   if (routingEnabled && typeof api.on === "function") {
     api.on(
       "before_prompt_build",
@@ -450,7 +463,7 @@ ${text}`
       if (params.list_topics === true || params.list_sections === true) return;
       if (typeof params.topic !== "string") return;
       const result = ev.result;
-      if (typeof result?.error === "string") return;
+      if (typeof result?.error === "string" || typeof result?.details?.error === "string") return;
       const resolved = resolveTopic(registry, params.topic);
       if (!resolved) return;
       const cx = ctx;
