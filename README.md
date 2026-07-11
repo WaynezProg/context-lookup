@@ -258,6 +258,9 @@ context_lookup({ topic: "deployment-runbook", list_sections: true })
   intentional: it lets you stage a registry change before placing the file.
 - Observe-only telemetry records event type, agent/run identifiers, tool name,
   topic, and destination class. It never records prompt text or full paths.
+- Manual lookups are associated with the active run through `after_tool_call`.
+  Routing state is capped at 128 runs and expires after 30 minutes; the plugin
+  does not request conversation-access hooks.
 
 ## Contributing
 

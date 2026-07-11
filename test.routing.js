@@ -123,11 +123,7 @@ async function testObserveOnlyTelemetry() {
       "function",
       "before_tool_call hook should register for observe-only telemetry",
     );
-    assert.equal(
-      typeof harness.hooks.agent_end,
-      "function",
-      "agent_end hook should clear per-run routing state",
-    );
+    assert.equal(harness.hooks.agent_end, undefined, "routing must not require conversation-access hooks");
 
     harness.hooks.before_prompt_build(
       { prompt: "請下載檔案", messages: [] },
@@ -178,16 +174,6 @@ async function testObserveOnlyTelemetry() {
       { agentId: "main", runId: "run-existing-edit", toolName: "edit" },
     );
 
-    harness.hooks.agent_end({}, { agentId: "main", runId: "run-auto" });
-    harness.hooks.before_tool_call(
-      {
-        toolName: "write",
-        params: {},
-        derivedPaths: [path.join(harness.root, "outputs", "pdf", "after-end.pdf")],
-      },
-      { agentId: "main", runId: "run-auto", toolName: "write" },
-    );
-
     const telemetryPath = path.join(harness.root, "logs", "context-routing.jsonl");
     const raw = fs.readFileSync(telemetryPath, "utf8").trim();
     const events = raw.split("\n").map((line) => JSON.parse(line));
@@ -195,10 +181,8 @@ async function testObserveOnlyTelemetry() {
       "auto_route",
       "lookup",
       "write_without_route",
-      "write_without_route",
     ]);
     assert.equal(events[2].destinationClass, "outputs");
-    assert.equal(events[3].runId, "run-auto");
     assert.ok(events.every((event) => !Object.hasOwn(event, "prompt")));
     assert.ok(events.every((event) => !Object.hasOwn(event, "path")));
     assert.doesNotMatch(raw, new RegExp(harness.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -261,13 +245,58 @@ async function testLimitedBlockingWhenExplicitlyEnabled() {
   }
 }
 
+async function testRoutingStateIsBounded() {
+  const harness = createHarness({
+    routing: {
+      enabled: true,
+      observeOnly: true,
+      telemetryFile: "logs/context-routing.jsonl",
+    },
+  });
+  try {
+    for (let i = 0; i < 130; i += 1) {
+      harness.hooks.before_prompt_build(
+        { prompt: "下載檔案", messages: [] },
+        { agentId: "main", runId: `run-${i}` },
+      );
+    }
+    harness.hooks.before_tool_call(
+      {
+        toolName: "write",
+        params: {},
+        derivedPaths: [path.join(harness.root, "outputs", "pdf", "oldest.pdf")],
+      },
+      { agentId: "main", runId: "run-0", toolName: "write" },
+    );
+    harness.hooks.before_tool_call(
+      {
+        toolName: "write",
+        params: {},
+        derivedPaths: [path.join(harness.root, "outputs", "pdf", "newest.pdf")],
+      },
+      { agentId: "main", runId: "run-129", toolName: "write" },
+    );
+
+    const telemetryPath = path.join(harness.root, "logs", "context-routing.jsonl");
+    const misses = fs.readFileSync(telemetryPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.event === "write_without_route");
+    assert.deepEqual(misses.map((event) => event.runId), ["run-0"]);
+  } finally {
+    harness.cleanup();
+  }
+}
+
 Promise.resolve()
   .then(testDefaultSectionAndSuggestion)
   .then(testConditionalRouting)
   .then(testObserveOnlyTelemetry)
   .then(testManifestRoutingSchema)
   .then(testLimitedBlockingWhenExplicitlyEnabled)
-  .then(() => console.log("5 total | 5 pass | 0 fail"))
+  .then(testRoutingStateIsBounded)
+  .then(() => console.log("6 total | 6 pass | 0 fail"))
   .catch((error) => {
     console.error(error.stack || error);
     process.exit(1);

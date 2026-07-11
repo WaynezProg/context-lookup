@@ -28,6 +28,8 @@ var DEFAULT_TOPICS_FILE = "topics.json";
 var DEFAULT_TOOL_NAME = "context_lookup";
 var DEFAULT_MAX_BYTES = 64e3;
 var WRITE_TOOLS = /* @__PURE__ */ new Set(["write", "edit", "apply_patch"]);
+var MAX_ROUTED_RUNS = 128;
+var ROUTED_RUN_TTL_MS = 30 * 60 * 1e3;
 var fileCache = /* @__PURE__ */ new Map();
 function readFileCached(filePath) {
   try {
@@ -262,11 +264,34 @@ function register(api) {
   const registry = loadRegistry(workspaceRoot, topicsFile);
   const routedRuns = /* @__PURE__ */ new Map();
   const telemetryPath = typeof routing?.telemetryFile === "string" && routing.telemetryFile.trim() ? (0, import_path.isAbsolute)(routing.telemetryFile) ? routing.telemetryFile : (0, import_path.join)(workspaceRoot, routing.telemetryFile) : null;
+  const pruneRoutedRuns = (now) => {
+    for (const [runId, state] of routedRuns) {
+      if (now - state.touchedAt > ROUTED_RUN_TTL_MS) routedRuns.delete(runId);
+    }
+  };
   const markRouted = (runId, topic) => {
     if (!runId) return;
-    const topics = routedRuns.get(runId) ?? /* @__PURE__ */ new Set();
-    topics.add(topic);
-    routedRuns.set(runId, topics);
+    const now = Date.now();
+    pruneRoutedRuns(now);
+    const existing = routedRuns.get(runId);
+    if (existing) {
+      existing.topics.add(topic);
+      existing.touchedAt = now;
+      routedRuns.delete(runId);
+      routedRuns.set(runId, existing);
+      return;
+    }
+    while (routedRuns.size >= MAX_ROUTED_RUNS) {
+      const oldest = routedRuns.keys().next().value;
+      if (!oldest) break;
+      routedRuns.delete(oldest);
+    }
+    routedRuns.set(runId, { topics: /* @__PURE__ */ new Set([topic]), touchedAt: now });
+  };
+  const hasRouted = (runId) => {
+    if (!runId) return false;
+    pruneRoutedRuns(Date.now());
+    return (routedRuns.get(runId)?.topics.size ?? 0) > 0;
   };
   const recordRoutingEvent = (event) => {
     if (!telemetryPath) return;
@@ -449,7 +474,7 @@ ${text}`
       if (skipAgents.has(agentId)) return;
       const toolName2 = ev.toolName ?? cx.toolName ?? "unknown";
       if (!WRITE_TOOLS.has(toolName2)) return;
-      if (cx.runId && (routedRuns.get(cx.runId)?.size ?? 0) > 0) return;
+      if (hasRouted(cx.runId)) return;
       const derivedPaths = ev.derivedPaths ?? [];
       const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every(
         (filePath) => (0, import_fs.existsSync)(filePath) && classifyDestination(filePath, workspaceRoot) === "project"
@@ -470,10 +495,6 @@ ${text}`
         block: true,
         blockReason: 'File-placement context was not loaded for this new destination. Call context_lookup({topic:"file-placement"}) and retry.'
       };
-    });
-    api.on("agent_end", (_event, ctx) => {
-      const runId = ctx.runId;
-      if (runId) routedRuns.delete(runId);
     });
   }
   log(`tool '${toolName}' registered (${registry.names.length} topics)`);

@@ -21,6 +21,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Plugin manifest declares startup activation and the `context_lookup` tool
   contract explicitly.
 
+### Fixed
+- Manual lookups now bind to the active run through `after_tool_call`, matching
+  OpenClaw's real tool context contract.
+- Replaced restricted `agent_end` cleanup with a 128-run, 30-minute bounded
+  state cache, so the plugin needs no conversation-access permission.
+
 ## [1.2.0] — 2026-04-19
 
 ### Added

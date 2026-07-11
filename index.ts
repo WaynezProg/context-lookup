@@ -100,7 +100,7 @@ interface OpenClawApi {
     execute: (params: unknown, ctx: unknown) => Promise<unknown>;
   }): void;
   on?(
-    name: "before_prompt_build" | "before_tool_call" | "after_tool_call" | "agent_end",
+    name: "before_prompt_build" | "before_tool_call" | "after_tool_call",
     handler: (event: unknown, ctx: unknown) => unknown,
     options?: { priority?: number },
   ): void;
@@ -116,6 +116,8 @@ const DEFAULT_TOPICS_FILE = "topics.json";
 const DEFAULT_TOOL_NAME = "context_lookup";
 const DEFAULT_MAX_BYTES = 64_000;
 const WRITE_TOOLS = new Set(["write", "edit", "apply_patch"]);
+const MAX_ROUTED_RUNS = 128;
+const ROUTED_RUN_TTL_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -443,16 +445,39 @@ export default function register(api: OpenClawApi): void {
       : 2500;
 
   const registry = loadRegistry(workspaceRoot, topicsFile);
-  const routedRuns = new Map<string, Set<string>>();
+  const routedRuns = new Map<string, { topics: Set<string>; touchedAt: number }>();
   const telemetryPath = typeof routing?.telemetryFile === "string" && routing.telemetryFile.trim()
     ? (isAbsolute(routing.telemetryFile) ? routing.telemetryFile : join(workspaceRoot, routing.telemetryFile))
     : null;
 
+  const pruneRoutedRuns = (now: number): void => {
+    for (const [runId, state] of routedRuns) {
+      if (now - state.touchedAt > ROUTED_RUN_TTL_MS) routedRuns.delete(runId);
+    }
+  };
   const markRouted = (runId: string | undefined, topic: string): void => {
     if (!runId) return;
-    const topics = routedRuns.get(runId) ?? new Set<string>();
-    topics.add(topic);
-    routedRuns.set(runId, topics);
+    const now = Date.now();
+    pruneRoutedRuns(now);
+    const existing = routedRuns.get(runId);
+    if (existing) {
+      existing.topics.add(topic);
+      existing.touchedAt = now;
+      routedRuns.delete(runId);
+      routedRuns.set(runId, existing);
+      return;
+    }
+    while (routedRuns.size >= MAX_ROUTED_RUNS) {
+      const oldest = routedRuns.keys().next().value as string | undefined;
+      if (!oldest) break;
+      routedRuns.delete(oldest);
+    }
+    routedRuns.set(runId, { topics: new Set([topic]), touchedAt: now });
+  };
+  const hasRouted = (runId: string | undefined): boolean => {
+    if (!runId) return false;
+    pruneRoutedRuns(Date.now());
+    return (routedRuns.get(runId)?.topics.size ?? 0) > 0;
   };
   const recordRoutingEvent = (event: RoutingEvent): void => {
     if (!telemetryPath) return;
@@ -656,7 +681,7 @@ export default function register(api: OpenClawApi): void {
       if (skipAgents.has(agentId)) return;
       const toolName = ev.toolName ?? cx.toolName ?? "unknown";
       if (!WRITE_TOOLS.has(toolName)) return;
-      if (cx.runId && (routedRuns.get(cx.runId)?.size ?? 0) > 0) return;
+      if (hasRouted(cx.runId)) return;
       const derivedPaths = ev.derivedPaths ?? [];
       const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every((filePath) =>
         existsSync(filePath) && classifyDestination(filePath, workspaceRoot) === "project"
@@ -677,10 +702,6 @@ export default function register(api: OpenClawApi): void {
         block: true,
         blockReason: "File-placement context was not loaded for this new destination. Call context_lookup({topic:\"file-placement\"}) and retry.",
       };
-    });
-    api.on("agent_end", (_event: unknown, ctx: unknown) => {
-      const runId = (ctx as { runId?: string }).runId;
-      if (runId) routedRuns.delete(runId);
     });
   }
 
