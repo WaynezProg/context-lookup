@@ -22,6 +22,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract explicitly.
 
 ### Fixed
+- Auto-routing now skips topics without a default section instead of injecting
+  their entire reference file.
+- File-write governance now requires the `file-placement` topic specifically;
+  looking up an unrelated topic no longer suppresses telemetry or blocking.
 - Registered `context_lookup` through OpenClaw's per-run tool factory and now
   return the required content-block result shape, preventing live tool calls
   from failing in the Codex harness.

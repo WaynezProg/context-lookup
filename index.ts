@@ -481,10 +481,10 @@ export default function register(api: OpenClawApi): void {
     }
     routedRuns.set(runId, { topics: new Set([topic]), touchedAt: now });
   };
-  const hasRouted = (runId: string | undefined): boolean => {
+  const hasRouted = (runId: string | undefined, topic: string): boolean => {
     if (!runId) return false;
     pruneRoutedRuns(Date.now());
-    return (routedRuns.get(runId)?.topics.size ?? 0) > 0;
+    return routedRuns.get(runId)?.topics.has(topic) === true;
   };
   const recordRoutingEvent = (event: RoutingEvent): void => {
     if (!telemetryPath) return;
@@ -647,7 +647,8 @@ export default function register(api: OpenClawApi): void {
         const content = readFileCached(filePath);
         if (content === null) return;
         const section = matched.entry.section;
-        const body = section ? extractSection(content, section) : content;
+        if (!section?.trim()) return;
+        const body = extractSection(content, section);
         if (!body) return;
         markRouted(cx.runId, matched.name);
         recordRoutingEvent({
@@ -705,7 +706,7 @@ export default function register(api: OpenClawApi): void {
       if (skipAgents.has(agentId)) return;
       const toolName = ev.toolName ?? cx.toolName ?? "unknown";
       if (!WRITE_TOOLS.has(toolName)) return;
-      if (hasRouted(cx.runId)) return;
+      if (hasRouted(cx.runId, "file-placement")) return;
       const derivedPaths = ev.derivedPaths ?? [];
       const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every((filePath) =>
         existsSync(filePath) && classifyDestination(filePath, workspaceRoot) === "project"

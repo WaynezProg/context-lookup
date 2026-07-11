@@ -23,6 +23,7 @@ function createHarness(pluginConfig = {}) {
       "FULL_ONLY",
     ].join("\n"),
   );
+  fs.writeFileSync(path.join(root, "shared", "tooling.md"), "# Tooling\n\nTOOL_ONLY\n");
   fs.writeFileSync(
     path.join(root, "topics.json"),
     JSON.stringify({
@@ -33,6 +34,11 @@ function createHarness(pluginConfig = {}) {
           section: "快速決策",
           aliases: ["placement", "storage"],
           triggers: ["下載", "匯出", "move", "archive"],
+        },
+        tooling: {
+          file: "shared/tooling.md",
+          category: "common-rules",
+          triggers: ["tooling-trigger"],
         },
       },
       categories: { "common-rules": { name: "通用", order: 1 } },
@@ -112,6 +118,16 @@ async function testConditionalRouting() {
     assert.match(triggerInjection.appendContext, /file-placement\/快速決策/);
     assert.match(triggerInjection.appendContext, /TMP_DEFAULT/);
     assert.doesNotMatch(triggerInjection.appendContext, /FULL_ONLY/);
+
+    const missingDefaultSection = harness.hooks.before_prompt_build(
+      { prompt: "tooling-trigger", messages: [] },
+      { agentId: "main", runId: "run-no-default-section" },
+    );
+    assert.equal(
+      missingDefaultSection,
+      undefined,
+      "auto-route must never inject a whole file when the topic has no default section",
+    );
   } finally {
     harness.cleanup();
   }
@@ -172,6 +188,24 @@ async function testObserveOnlyTelemetry() {
     );
     assert.equal(beforeToolResult, undefined, "observe-only mode cannot block writes");
 
+    const unrelatedLookupResult = await executeTool(harness, { topic: "tooling" });
+    harness.hooks.after_tool_call(
+      {
+        toolName: "context_lookup",
+        params: { topic: "tooling" },
+        result: unrelatedLookupResult,
+      },
+      { agentId: "main", runId: "run-unrelated-lookup" },
+    );
+    harness.hooks.before_tool_call(
+      {
+        toolName: "write",
+        params: {},
+        derivedPaths: [path.join(harness.root, "outputs", "pdf", "unrelated.pdf")],
+      },
+      { agentId: "main", runId: "run-unrelated-lookup", toolName: "write" },
+    );
+
     const existingRepoFile = path.join(harness.root, "projects", "app", "src", "existing.ts");
     fs.mkdirSync(path.dirname(existingRepoFile), { recursive: true });
     fs.writeFileSync(existingRepoFile, "export const existing = true;\n");
@@ -187,8 +221,11 @@ async function testObserveOnlyTelemetry() {
       "auto_route",
       "lookup",
       "write_without_route",
+      "lookup",
+      "write_without_route",
     ]);
     assert.equal(events[2].destinationClass, "outputs");
+    assert.equal(events[4].runId, "run-unrelated-lookup");
     assert.ok(events.every((event) => !Object.hasOwn(event, "prompt")));
     assert.ok(events.every((event) => !Object.hasOwn(event, "path")));
     assert.doesNotMatch(raw, new RegExp(harness.root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

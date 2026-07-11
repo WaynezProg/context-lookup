@@ -288,10 +288,10 @@ function register(api) {
     }
     routedRuns.set(runId, { topics: /* @__PURE__ */ new Set([topic]), touchedAt: now });
   };
-  const hasRouted = (runId) => {
+  const hasRouted = (runId, topic) => {
     if (!runId) return false;
     pruneRoutedRuns(Date.now());
-    return (routedRuns.get(runId)?.topics.size ?? 0) > 0;
+    return routedRuns.get(runId)?.topics.has(topic) === true;
   };
   const recordRoutingEvent = (event) => {
     if (!telemetryPath) return;
@@ -436,7 +436,8 @@ function register(api) {
         const content = readFileCached(filePath);
         if (content === null) return;
         const section = matched.entry.section;
-        const body = section ? extractSection(content, section) : content;
+        if (!section?.trim()) return;
+        const body = extractSection(content, section);
         if (!body) return;
         markRouted(cx.runId, matched.name);
         recordRoutingEvent({
@@ -487,7 +488,7 @@ ${text}`
       if (skipAgents.has(agentId)) return;
       const toolName2 = ev.toolName ?? cx.toolName ?? "unknown";
       if (!WRITE_TOOLS.has(toolName2)) return;
-      if (hasRouted(cx.runId)) return;
+      if (hasRouted(cx.runId, "file-placement")) return;
       const derivedPaths = ev.derivedPaths ?? [];
       const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every(
         (filePath) => (0, import_fs.existsSync)(filePath) && classifyDestination(filePath, workspaceRoot) === "project"
