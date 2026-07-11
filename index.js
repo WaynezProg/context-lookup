@@ -74,11 +74,15 @@ function truncate(content, maxBytes) {
 \u2026[truncated: original ${buf.byteLength} bytes, returned ${maxBytes}]`;
   return { text: sliced + note, truncated: true };
 }
+function pluginDebugEnabled() {
+  const value = process.env.OPENCLAW_PLUGIN_DEBUG || process.env.OPENCLAW_DEBUG_PLUGINS || "";
+  return /^(1|true|yes)$/i.test(value);
+}
 function log(msg) {
-  console.log(`[context-lookup] ${msg}`);
+  if (pluginDebugEnabled()) console.error(`[context-lookup] ${msg}`);
 }
 function warn(msg) {
-  console.log(`[context-lookup] WARN: ${msg}`);
+  console.warn(`[context-lookup] WARN: ${msg}`);
 }
 function resolveOpenClawDefaultWorkspaceRoot() {
   const env = process.env;

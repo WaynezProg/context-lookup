@@ -1,9 +1,15 @@
 {
   "id": "context-lookup",
+  "activation": {
+    "onStartup": true
+  },
   "name": "Context Lookup",
   "version": "1.2.0",
   "description": "Registers a single function-call style tool `context_lookup` that lets agents fetch shared context, tool docs, and topic-indexed knowledge on demand. No auto-injection; agents query by topic name. Tool description is locale-aware (en/zh-TW) and stays short — agents call list_topics on demand.",
   "entry": "./index.js",
+  "contracts": {
+    "tools": ["context_lookup"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
