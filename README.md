@@ -90,7 +90,6 @@ All fields are optional. Defaults shown in comments:
 ```jsonc
 "context-lookup": {
   "topicsFile":    "topics.json",   // relative to workspaceRoot, or absolute
-  "toolName":      "context_lookup", // override the registered tool name
   "maxBytes":      64000,            // truncate responses larger than this
   "skipAgents":    [],               // agent IDs to exclude
   "locale":        "en",             // tool description: "en" or "zh-TW"

@@ -22,6 +22,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract explicitly.
 
 ### Fixed
+- Injection byte limits now cover the complete header, body, and truncation
+  note while preserving UTF-8 code-point boundaries.
+- The registered tool name is fixed to the manifest-owned `context_lookup`
+  contract; runtime name overrides are no longer accepted.
 - Auto-routing now skips topics without a default section instead of injecting
   their entire reference file.
 - File-write governance now requires the `file-placement` topic specifically;

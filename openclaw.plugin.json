@@ -17,10 +17,6 @@
         "type": "string",
         "description": "Path to the topic registry JSON file, relative to workspace root (or absolute). Defaults to 'topics.json'."
       },
-      "toolName": {
-        "type": "string",
-        "description": "Override the registered tool name. Defaults to 'context_lookup'."
-      },
       "maxBytes": {
         "type": "number",
         "description": "Maximum bytes returned per lookup. Files larger than this are truncated with a note. Defaults to 64000."

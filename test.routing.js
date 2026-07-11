@@ -18,6 +18,7 @@ function createHarness(pluginConfig = {}) {
       "",
       "## 快速決策",
       "TMP_DEFAULT",
+      "漢".repeat(600),
       "",
       "## 完整參考",
       "FULL_ONLY",
@@ -47,10 +48,12 @@ function createHarness(pluginConfig = {}) {
 
   const hooks = {};
   let tool;
+  let registrationOptions;
   const api = {
     pluginConfig,
     getWorkspaceRoot: () => root,
-    registerTool: (definition) => {
+    registerTool: (definition, options) => {
+      registrationOptions = options;
       tool = typeof definition === "function"
         ? definition({ agentId: "main", workspaceDir: root })
         : definition;
@@ -63,6 +66,7 @@ function createHarness(pluginConfig = {}) {
   return {
     root,
     tool,
+    registrationOptions,
     hooks,
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
   };
@@ -128,6 +132,32 @@ async function testConditionalRouting() {
       undefined,
       "auto-route must never inject a whole file when the topic has no default section",
     );
+
+    const cappedHarness = createHarness({
+      routing: { enabled: true, observeOnly: true, maxInjectedBytes: 256 },
+    });
+    try {
+      const capped = cappedHarness.hooks.before_prompt_build(
+        { prompt: "請下載檔案", messages: [] },
+        { agentId: "main", runId: "run-byte-cap" },
+      );
+      assert.ok(Buffer.byteLength(capped.appendContext, "utf8") <= 256);
+      assert.doesNotMatch(capped.appendContext, /\uFFFD/, "UTF-8 truncation must not split a code point");
+    } finally {
+      cappedHarness.cleanup();
+    }
+  } finally {
+    harness.cleanup();
+  }
+}
+
+function testStaticToolContract() {
+  const harness = createHarness({ toolName: "renamed_lookup" });
+  try {
+    assert.equal(harness.tool.name, "context_lookup", "manifest-owned tool name must stay static");
+    assert.deepEqual(harness.registrationOptions, { name: "context_lookup" });
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"));
+    assert.equal(manifest.configSchema.properties.toolName, undefined);
   } finally {
     harness.cleanup();
   }
@@ -336,10 +366,11 @@ Promise.resolve()
   .then(testDefaultSectionAndSuggestion)
   .then(testConditionalRouting)
   .then(testObserveOnlyTelemetry)
+  .then(testStaticToolContract)
   .then(testManifestRoutingSchema)
   .then(testLimitedBlockingWhenExplicitlyEnabled)
   .then(testRoutingStateIsBounded)
-  .then(() => console.log("6 total | 6 pass | 0 fail"))
+  .then(() => console.log("7 total | 7 pass | 0 fail"))
   .catch((error) => {
     console.error(error.stack || error);
     process.exit(1);

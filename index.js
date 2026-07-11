@@ -68,14 +68,23 @@ function extractSection(content, section) {
 function listHeadings(content) {
   return content.match(/^#{1,6} .+$/gm) ?? [];
 }
+function sliceUtf8(buffer, maxBytes) {
+  let end = Math.min(maxBytes, buffer.byteLength);
+  while (end > 0 && end < buffer.byteLength && (buffer[end] & 192) === 128) end -= 1;
+  return buffer.subarray(0, end).toString("utf-8");
+}
 function truncate(content, maxBytes) {
   const buf = Buffer.from(content, "utf-8");
   if (buf.byteLength <= maxBytes) return { text: content, truncated: false };
-  const sliced = buf.subarray(0, maxBytes).toString("utf-8");
   const note = `
 
-\u2026[truncated: original ${buf.byteLength} bytes, returned ${maxBytes}]`;
-  return { text: sliced + note, truncated: true };
+\u2026[truncated: original ${buf.byteLength} bytes]`;
+  const noteBytes = Buffer.byteLength(note, "utf-8");
+  if (noteBytes >= maxBytes) return { text: sliceUtf8(buf, maxBytes), truncated: true };
+  return {
+    text: sliceUtf8(buf, maxBytes - noteBytes) + note,
+    truncated: true
+  };
 }
 function pluginDebugEnabled() {
   const value = process.env.OPENCLAW_PLUGIN_DEBUG || process.env.OPENCLAW_DEBUG_PLUGINS || "";
@@ -253,7 +262,7 @@ function register(api) {
     return;
   }
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
-  const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
+  const toolName = DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
@@ -421,7 +430,7 @@ function register(api) {
         details
       };
     }
-  }));
+  }), { name: DEFAULT_TOOL_NAME });
   if (routingEnabled && typeof api.on === "function") {
     api.on(
       "before_prompt_build",
@@ -449,11 +458,10 @@ function register(api) {
           toolName: null,
           destinationClass: null
         });
-        const { text } = truncate(body, maxInjectedBytes);
-        return {
-          appendContext: `[On-demand context: ${matched.name}/${section ?? "full"}]
-${text}`
-        };
+        const header = `[On-demand context: ${matched.name}/${section}]`;
+        const { text } = truncate(`${header}
+${body}`, maxInjectedBytes);
+        return { appendContext: text };
       },
       { priority: 20 }
     );

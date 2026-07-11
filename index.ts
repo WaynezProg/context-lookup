@@ -50,7 +50,6 @@ interface TopicRegistry {
 
 interface PluginConfig {
   topicsFile?: string;
-  toolName?: string;
   maxBytes?: number;
   skipAgents?: string[];
   /** Tool description language. "en" (default) or "zh-TW". */
@@ -105,7 +104,7 @@ interface OpenClawApi {
     description: string;
     parameters: Record<string, unknown>;
     execute: (toolCallId: string, params: unknown) => Promise<AgentToolResult>;
-  })): void;
+  }), options?: { name?: string }): void;
   on?(
     name: "before_prompt_build" | "before_tool_call" | "after_tool_call",
     handler: (event: unknown, ctx: unknown) => unknown,
@@ -177,12 +176,22 @@ function listHeadings(content: string): string[] {
   return content.match(/^#{1,6} .+$/gm) ?? [];
 }
 
+function sliceUtf8(buffer: Buffer, maxBytes: number): string {
+  let end = Math.min(maxBytes, buffer.byteLength);
+  while (end > 0 && end < buffer.byteLength && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString("utf-8");
+}
+
 function truncate(content: string, maxBytes: number): { text: string; truncated: boolean } {
   const buf = Buffer.from(content, "utf-8");
   if (buf.byteLength <= maxBytes) return { text: content, truncated: false };
-  const sliced = buf.subarray(0, maxBytes).toString("utf-8");
-  const note = `\n\n…[truncated: original ${buf.byteLength} bytes, returned ${maxBytes}]`;
-  return { text: sliced + note, truncated: true };
+  const note = `\n\n…[truncated: original ${buf.byteLength} bytes]`;
+  const noteBytes = Buffer.byteLength(note, "utf-8");
+  if (noteBytes >= maxBytes) return { text: sliceUtf8(buf, maxBytes), truncated: true };
+  return {
+    text: sliceUtf8(buf, maxBytes - noteBytes) + note,
+    truncated: true,
+  };
 }
 
 function pluginDebugEnabled(): boolean {
@@ -439,7 +448,7 @@ export default function register(api: OpenClawApi): void {
   }
 
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
-  const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
+  const toolName = DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
   const locale: Locale = config.locale === "zh-TW" ? "zh-TW" : "en";
@@ -629,7 +638,7 @@ export default function register(api: OpenClawApi): void {
         details,
       };
     },
-  }));
+  }), { name: DEFAULT_TOOL_NAME });
 
   if (routingEnabled && typeof api.on === "function") {
     api.on(
@@ -660,10 +669,9 @@ export default function register(api: OpenClawApi): void {
           toolName: null,
           destinationClass: null,
         });
-        const { text } = truncate(body, maxInjectedBytes);
-        return {
-          appendContext: `[On-demand context: ${matched.name}/${section ?? "full"}]\n${text}`,
-        };
+        const header = `[On-demand context: ${matched.name}/${section}]`;
+        const { text } = truncate(`${header}\n${body}`, maxInjectedBytes);
+        return { appendContext: text };
       },
       { priority: 20 },
     );
