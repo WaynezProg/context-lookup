@@ -1,7 +1,7 @@
 {
   "name": "context-lookup",
-  "version": "1.2.0",
-  "description": "OpenClaw plugin: function-call style on-demand context lookup tool. Replaces auto-injection with explicit topic queries.",
+  "version": "1.3.0",
+  "description": "OpenClaw plugin for on-demand context lookup, conditional section routing, and privacy-safe routing telemetry.",
   "type": "commonjs",
   "main": "./index.js",
   "license": "MIT",
@@ -16,6 +16,7 @@
     "extensions": ["./index.js"]
   },
   "scripts": {
-    "build": "npx esbuild index.ts --bundle --platform=node --format=cjs --outfile=index.js --external:fs --external:path"
+    "build": "npx esbuild index.ts --bundle --platform=node --format=cjs --outfile=index.js --external:fs --external:path",
+    "test": "node test.routing.js"
   }
 }

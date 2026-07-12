@@ -27,6 +27,9 @@ var import_path = require("path");
 var DEFAULT_TOPICS_FILE = "topics.json";
 var DEFAULT_TOOL_NAME = "context_lookup";
 var DEFAULT_MAX_BYTES = 64e3;
+var WRITE_TOOLS = /* @__PURE__ */ new Set(["write", "edit", "apply_patch"]);
+var MAX_ROUTED_RUNS = 128;
+var ROUTED_RUN_TTL_MS = 30 * 60 * 1e3;
 var fileCache = /* @__PURE__ */ new Map();
 function readFileCached(filePath) {
   try {
@@ -65,20 +68,33 @@ function extractSection(content, section) {
 function listHeadings(content) {
   return content.match(/^#{1,6} .+$/gm) ?? [];
 }
+function sliceUtf8(buffer, maxBytes) {
+  let end = Math.min(maxBytes, buffer.byteLength);
+  while (end > 0 && end < buffer.byteLength && (buffer[end] & 192) === 128) end -= 1;
+  return buffer.subarray(0, end).toString("utf-8");
+}
 function truncate(content, maxBytes) {
   const buf = Buffer.from(content, "utf-8");
   if (buf.byteLength <= maxBytes) return { text: content, truncated: false };
-  const sliced = buf.subarray(0, maxBytes).toString("utf-8");
   const note = `
 
-\u2026[truncated: original ${buf.byteLength} bytes, returned ${maxBytes}]`;
-  return { text: sliced + note, truncated: true };
+\u2026[truncated: original ${buf.byteLength} bytes]`;
+  const noteBytes = Buffer.byteLength(note, "utf-8");
+  if (noteBytes >= maxBytes) return { text: sliceUtf8(buf, maxBytes), truncated: true };
+  return {
+    text: sliceUtf8(buf, maxBytes - noteBytes) + note,
+    truncated: true
+  };
+}
+function pluginDebugEnabled() {
+  const value = process.env.OPENCLAW_PLUGIN_DEBUG || process.env.OPENCLAW_DEBUG_PLUGINS || "";
+  return /^(1|true|yes)$/i.test(value);
 }
 function log(msg) {
-  console.log(`[context-lookup] ${msg}`);
+  if (pluginDebugEnabled()) console.error(`[context-lookup] ${msg}`);
 }
 function warn(msg) {
-  console.log(`[context-lookup] WARN: ${msg}`);
+  console.warn(`[context-lookup] WARN: ${msg}`);
 }
 function resolveOpenClawDefaultWorkspaceRoot() {
   const env = process.env;
@@ -120,10 +136,18 @@ function loadRegistry(workspaceRoot, topicsFile) {
       warn(`topic "${name}" missing required "file" \u2014 skipped`);
       continue;
     }
-    byName.set(name, entry);
-    if (Array.isArray(entry.aliases)) {
-      for (const alias of entry.aliases) {
-        if (typeof alias !== "string") continue;
+    const normalizedEntry = {
+      ...entry,
+      aliases: Array.isArray(entry.aliases) ? entry.aliases.filter(
+        (alias) => typeof alias === "string" && alias.trim().length > 0
+      ) : [],
+      triggers: Array.isArray(entry.triggers) ? entry.triggers.filter(
+        (trigger) => typeof trigger === "string" && trigger.trim().length > 0
+      ) : []
+    };
+    byName.set(name, normalizedEntry);
+    if (Array.isArray(normalizedEntry.aliases)) {
+      for (const alias of normalizedEntry.aliases) {
         if (aliasIndex.has(alias) || byName.has(alias)) {
           warn(`alias "${alias}" of "${name}" collides with existing topic/alias \u2014 skipped`);
           continue;
@@ -149,6 +173,62 @@ function resolveTopic(reg, query) {
     if (entry) return { name: aliased, entry };
   }
   return null;
+}
+function normalizeLookupKey(value) {
+  return value.trim().toLocaleLowerCase("en-US").replace(/[\s_]+/g, "-");
+}
+function suggestTopics(query, registry) {
+  const needle = normalizeLookupKey(query);
+  if (!needle) return [];
+  return registry.names.map((name) => ({
+    name,
+    keys: [name, ...registry.byName.get(name)?.aliases ?? []]
+  })).filter(({ keys }) => keys.some((key) => {
+    const normalized = normalizeLookupKey(key);
+    return normalized.includes(needle) || needle.includes(normalized);
+  })).map(({ name }) => name).slice(0, 3);
+}
+function matchAutoRoute(prompt, registry) {
+  const normalizedPrompt = prompt.toLocaleLowerCase("en-US");
+  if (!normalizedPrompt.trim()) return null;
+  for (const name of registry.names) {
+    const entry = registry.byName.get(name);
+    if (!entry || !Array.isArray(entry.triggers)) continue;
+    const matched = entry.triggers.some(
+      (trigger) => normalizedPrompt.includes(trigger.toLocaleLowerCase("en-US"))
+    );
+    if (matched) return { name, entry };
+  }
+  return null;
+}
+function timestampSeconds() {
+  return (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+function classifyDestination(filePath, workspaceRoot) {
+  if (!filePath || !(0, import_path.isAbsolute)(filePath)) return "unknown";
+  const target = (0, import_path.resolve)(filePath);
+  const workspace = (0, import_path.resolve)(workspaceRoot);
+  const workspaceRel = (0, import_path.relative)(workspace, target);
+  if (workspaceRel === "") return "workspace-root";
+  if (!workspaceRel.startsWith(`..${import_path.sep}`) && workspaceRel !== ".." && !(0, import_path.isAbsolute)(workspaceRel)) {
+    const first = workspaceRel.split(import_path.sep)[0];
+    if (first === "outputs") return "outputs";
+    if (first === "archive") return "archive";
+    if (first === "projects") return "project";
+    if (first === "agents") return "agent-workspace";
+    if (first === "tmp") return "tmp";
+    return "workspace-root";
+  }
+  const openClawRoot = (0, import_path.dirname)(workspace);
+  const openClawRel = (0, import_path.relative)(openClawRoot, target);
+  if (!openClawRel.startsWith(`..${import_path.sep}`) && openClawRel !== ".." && !(0, import_path.isAbsolute)(openClawRel)) {
+    if (openClawRel.split(import_path.sep)[0] === "tmp") return "tmp";
+  }
+  return "external";
+}
+function normalizeDestinationPath(value, workspaceRoot) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return (0, import_path.resolve)(workspaceRoot, value.trim());
 }
 var TOOL_DESCRIPTIONS = {
   en: {
@@ -194,19 +274,65 @@ function register(api) {
     return;
   }
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
-  const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
+  const toolName = DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
+  const routing = config.routing;
+  const routingEnabled = routing?.enabled === true;
+  const observeOnly = routing?.observeOnly !== false;
+  const maxInjectedBytes = typeof routing?.maxInjectedBytes === "number" && routing.maxInjectedBytes > 0 ? routing.maxInjectedBytes : 2500;
   const registry = loadRegistry(workspaceRoot, topicsFile);
+  const routedRuns = /* @__PURE__ */ new Map();
+  const telemetryPath = typeof routing?.telemetryFile === "string" && routing.telemetryFile.trim() ? (0, import_path.isAbsolute)(routing.telemetryFile) ? routing.telemetryFile : (0, import_path.join)(workspaceRoot, routing.telemetryFile) : null;
+  const pruneRoutedRuns = (now) => {
+    for (const [runId, state] of routedRuns) {
+      if (now - state.touchedAt > ROUTED_RUN_TTL_MS) routedRuns.delete(runId);
+    }
+  };
+  const markRouted = (runId, topic) => {
+    if (!runId) return;
+    const now = Date.now();
+    pruneRoutedRuns(now);
+    const existing = routedRuns.get(runId);
+    if (existing) {
+      existing.topics.add(topic);
+      existing.touchedAt = now;
+      routedRuns.delete(runId);
+      routedRuns.set(runId, existing);
+      return;
+    }
+    while (routedRuns.size >= MAX_ROUTED_RUNS) {
+      const oldest = routedRuns.keys().next().value;
+      if (!oldest) break;
+      routedRuns.delete(oldest);
+    }
+    routedRuns.set(runId, { topics: /* @__PURE__ */ new Set([topic]), touchedAt: now });
+  };
+  const hasRouted = (runId, topic) => {
+    if (!runId) return false;
+    pruneRoutedRuns(Date.now());
+    return routedRuns.get(runId)?.topics.has(topic) === true;
+  };
+  const recordRoutingEvent = (event) => {
+    if (!telemetryPath) return;
+    try {
+      (0, import_fs.mkdirSync)((0, import_path.dirname)(telemetryPath), { recursive: true });
+      (0, import_fs.appendFileSync)(telemetryPath, `${JSON.stringify(event)}
+`, "utf-8");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warn(`failed to append routing telemetry: ${message}`);
+    }
+  };
   log(
-    `v1.2 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}`
+    `v1.3 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}, routing=${routingEnabled ? "enabled" : "disabled"}`
   );
   if (typeof api.registerTool !== "function") {
     warn("registerTool not available on this host \u2014 plugin disabled");
     return;
   }
-  api.registerTool({
+  const lookupTool = {
     name: toolName,
     description: buildToolDescription(registry, toolName, locale),
     parameters: {
@@ -271,8 +397,10 @@ function register(api) {
       }
       const resolved = resolveTopic(registry, p.topic);
       if (!resolved) {
+        const suggestions = suggestTopics(p.topic, registry);
+        const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
         return {
-          error: `Unknown topic '${p.topic}'. Available: ${registry.names.join(", ") || "(none)"}`
+          error: `Unknown topic '${p.topic}'.${hint} Available: ${registry.names.join(", ") || "(none)"}`
         };
       }
       const { name, entry } = resolved;
@@ -301,6 +429,112 @@ function register(api) {
       if (truncated) result.truncated = true;
       return result;
     }
-  });
+  };
+  api.registerTool((toolCtx) => ({
+    name: lookupTool.name,
+    label: "Context Lookup",
+    description: lookupTool.description,
+    parameters: lookupTool.parameters,
+    execute: async (_toolCallId, params) => {
+      const details = await lookupTool.execute(params, toolCtx);
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details
+      };
+    }
+  }), { name: DEFAULT_TOOL_NAME });
+  if (routingEnabled && typeof api.on === "function") {
+    api.on(
+      "before_prompt_build",
+      (event, ctx) => {
+        const ev = event;
+        const cx = ctx;
+        if (!cx.agentId || skipAgents.has(cx.agentId)) return;
+        if (typeof ev.prompt !== "string") return;
+        const matched = matchAutoRoute(ev.prompt, registry);
+        if (!matched) return;
+        const filePath = (0, import_path.isAbsolute)(matched.entry.file) ? matched.entry.file : (0, import_path.join)(workspaceRoot, matched.entry.file);
+        const content = readFileCached(filePath);
+        if (content === null) return;
+        const section = matched.entry.section;
+        if (!section?.trim()) return;
+        const body = extractSection(content, section);
+        if (!body) return;
+        markRouted(cx.runId, matched.name);
+        recordRoutingEvent({
+          ts: timestampSeconds(),
+          event: "auto_route",
+          agentId: cx.agentId,
+          runId: cx.runId ?? null,
+          topic: matched.name,
+          toolName: null,
+          destinationClass: null
+        });
+        const header = `[On-demand context: ${matched.name}/${section}]`;
+        const { text } = truncate(`${header}
+${body}`, maxInjectedBytes);
+        return { appendContext: text };
+      },
+      { priority: 20 }
+    );
+    api.on("after_tool_call", (event, ctx) => {
+      const ev = event;
+      if (ev.toolName !== toolName || ev.error) return;
+      const params = ev.params ?? {};
+      if (params.list_topics === true || params.list_sections === true) return;
+      if (typeof params.topic !== "string") return;
+      const result = ev.result;
+      if (typeof result?.error === "string" || typeof result?.details?.error === "string") return;
+      const resolved = resolveTopic(registry, params.topic);
+      if (!resolved) return;
+      const cx = ctx;
+      const agentId = cx.agentId ?? "unknown";
+      if (skipAgents.has(agentId)) return;
+      markRouted(cx.runId, resolved.name);
+      recordRoutingEvent({
+        ts: timestampSeconds(),
+        event: "lookup",
+        agentId,
+        runId: cx.runId ?? null,
+        topic: resolved.name,
+        toolName,
+        destinationClass: null
+      });
+    });
+    api.on("before_tool_call", (event, ctx) => {
+      const ev = event;
+      const cx = ctx;
+      const agentId = cx.agentId ?? "unknown";
+      if (skipAgents.has(agentId)) return;
+      const toolName2 = ev.toolName ?? cx.toolName ?? "unknown";
+      if (!WRITE_TOOLS.has(toolName2)) return;
+      if (hasRouted(cx.runId, "file-placement")) return;
+      const agentWorkspaceRoot = normalizeDestinationPath(cx.workspaceDir, workspaceRoot) ?? workspaceRoot;
+      const paramPath = normalizeDestinationPath(
+        ev.params?.path ?? ev.params?.file_path,
+        agentWorkspaceRoot
+      );
+      const derivedPaths = ev.derivedPaths?.length ? ev.derivedPaths : paramPath ? [paramPath] : [];
+      const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every(
+        (filePath) => (0, import_fs.existsSync)(filePath) && classifyDestination(filePath, agentWorkspaceRoot) === "project"
+      );
+      if (existingRepoEdit) return;
+      const destinationClass = classifyDestination(derivedPaths[0], agentWorkspaceRoot);
+      recordRoutingEvent({
+        ts: timestampSeconds(),
+        event: "write_without_route",
+        agentId,
+        runId: cx.runId ?? null,
+        topic: null,
+        toolName: toolName2,
+        destinationClass
+      });
+      if (observeOnly || destinationClass === "unknown") return;
+      return {
+        block: true,
+        blockReason: 'File-placement context was not loaded for this new destination. Call context_lookup({topic:"file-placement"}) and retry.'
+      };
+    });
+  }
   log(`tool '${toolName}' registered (${registry.names.length} topics)`);
 }

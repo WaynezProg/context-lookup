@@ -12,10 +12,10 @@
 
 - One tool, one job: agents query by topic name, the plugin returns the file
   (or a single section of it).
-- **No auto-injection** — no first-turn dump, no compact reminders, no
-  bootstrap filtering. The host (e.g. OpenClaw core) keeps its own injection
-  for `AGENTS.md / TOOLS.md / SOUL.md / IDENTITY.md / USER.md / MEMORY.md /
-  HEARTBEAT.md`; this plugin handles everything else.
+- **No bulk auto-injection.** Optional deterministic triggers can inject only
+  a topic's default section; routing is disabled unless configured. The host
+  keeps its own bootstrap injection for `AGENTS.md / TOOLS.md / SOUL.md /
+  IDENTITY.md / USER.md / MEMORY.md / HEARTBEAT.md`.
 - Topic registry lives in a single JSON file outside `openclaw.json` so it
   can be edited and version-controlled separately.
 - Tool description is short (≤ 8 lines) and locale-aware. Agents call
@@ -51,11 +51,11 @@ cp examples/topics.example.json ~/.openclaw/workspace/topics.json
 openclaw gateway restart
 ```
 
-After restart, agents will see `context_lookup` in their tool list. Verify
-with the gateway log:
+After restart, agents will see `context_lookup` in their tool list. With
+`OPENCLAW_PLUGIN_DEBUG=1`, the gateway log includes:
 
 ```
-[context-lookup] v1.2 init: workspaceRoot=…, topicsFile=…, topics=N, tool=context_lookup, locale=en
+[context-lookup] v1.3 init: workspaceRoot=…, topicsFile=…, topics=N, tool=context_lookup, locale=en, routing=disabled
 [context-lookup] tool 'context_lookup' registered (N topics)
 ```
 
@@ -66,7 +66,7 @@ Requirements:
 - Node.js 18+ (the bundled output is CommonJS, `fs` and `path` external)
 - An OpenClaw host that supports plugins via `entry: "./index.js"`
 
-Build artefact: `index.js` (~11 kB, bundled with esbuild).
+Build artefact: `index.js` (~20 kB, bundled with esbuild).
 
 ```bash
 npm run build
@@ -90,11 +90,16 @@ All fields are optional. Defaults shown in comments:
 ```jsonc
 "context-lookup": {
   "topicsFile":    "topics.json",   // relative to workspaceRoot, or absolute
-  "toolName":      "context_lookup", // override the registered tool name
   "maxBytes":      64000,            // truncate responses larger than this
   "skipAgents":    [],               // agent IDs to exclude
   "locale":        "en",             // tool description: "en" or "zh-TW"
-  "workspaceRoot": null              // absolute path; only needed if host doesn't supply one
+  "workspaceRoot": null,             // absolute path; only needed if host doesn't supply one
+  "routing": {
+    "enabled": false,                // opt in to deterministic prompt routing
+    "observeOnly": true,             // false blocks recognized new destinations without route context
+    "telemetryFile": "logs/context-routing.jsonl",
+    "maxInjectedBytes": 2500
+  }
 }
 ```
 
@@ -123,7 +128,8 @@ the tool.
       "section":     "Branch naming",                // optional, default heading
       "description": "Commit message format, PR review checklist",
       "category":    "common-rules",
-      "aliases":     ["git", "git-style"]
+      "aliases":     ["git", "git-style"],
+      "triggers":    ["commit", "branch", "pull request"]
     }
   }
 }
@@ -137,13 +143,20 @@ the tool.
 | `topics.<name>.section`  | no       | Default heading substring to slice (case-insensitive, fuzzy). |
 | `topics.<name>.description` | no    | Shown to agents in `list_topics`. Strongly recommended. |
 | `topics.<name>.category` | no       | Category id. Topics without a category go under `uncategorized`. |
-| `topics.<name>.aliases`  | no       | Alternative names that resolve to this topic. |
+| `topics.<name>.aliases`  | no       | Non-empty alternative names that resolve to this topic. Invalid entries are ignored. |
+| `topics.<name>.triggers` | no       | Non-empty literal case-insensitive prompt fragments used only when routing is enabled. Invalid entries are ignored. |
 
 A `_readme` key at any level is ignored by the plugin and can be used for
 inline documentation.
 
 The plugin reads `topics.json` once at startup. Edit and restart the host
-(it does not hot-reload).
+(it does not hot-reload). Trigger matching is deterministic and injects only
+the matched topic's default `section`, capped by `maxInjectedBytes`.
+
+Keep `observeOnly: true` while tuning triggers. When explicitly set to false,
+the plugin blocks recognized `write`/`edit`/`apply_patch` calls for new
+destinations that lack routing context. Existing files inside `projects/` and
+opaque `exec` calls are not blocked.
 
 A complete example: [`examples/topics.example.json`](examples/topics.example.json).
 
@@ -168,7 +181,7 @@ context_lookup({
 | `{ topic, section }`                            | Same as above, content sliced from the matched heading down.            |
 | `{ topic, list_sections: true }`                | `{ topic, file, sections: string[] }`                                  |
 | `{ list_topics: true }`                         | `{ categories: [{ id, name, topics: [...] }], total: number }`         |
-| Anything else / unresolved                      | `{ error: string }` — message includes the canonical topic list.       |
+| Anything else / unresolved                      | `{ error: string }` — message includes suggestions and canonical names. |
 
 ### Section matching
 
@@ -226,8 +239,8 @@ context_lookup({ topic: "deployment-runbook", list_sections: true })
 | Feature                                | Typical plugin           | context-lookup           |
 | -------------------------------------- | ------------------------ | ------------------------ |
 | Auto-inject standard agent files       | yes (filters/compacts)   | no — host handles it     |
-| Inject shared context on first turn    | yes                      | no                       |
-| Inject shared context every turn       | yes                      | no                       |
+| Inject shared context on first turn    | yes                      | no bulk injection        |
+| Inject shared context every turn       | yes                      | matched section only     |
 | Compact reminder on later turns        | yes                      | no                       |
 | On-demand fetch tool                   | path-based               | topic-name based         |
 | Tool description size                  | grows with topic count   | fixed (~7 lines)         |
@@ -242,6 +255,11 @@ context_lookup({ topic: "deployment-runbook", list_sections: true })
 - The plugin does not validate that the files referenced by `topics.<name>.file`
   exist at startup — missing files return an error at lookup time. This is
   intentional: it lets you stage a registry change before placing the file.
+- Observe-only telemetry records event type, agent/run identifiers, tool name,
+  topic, and destination class. It never records prompt text or full paths.
+- Manual lookups are associated with the active run through `after_tool_call`.
+  Routing state is capped at 128 runs and expires after 30 minutes; the plugin
+  does not request conversation-access hooks.
 
 ## Contributing
 

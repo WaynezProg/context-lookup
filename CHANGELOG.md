@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-07-11
+
+### Added
+- Optional deterministic prompt triggers that inject only a topic's default
+  section instead of the full reference file.
+- Privacy-safe JSONL telemetry for auto-routes, manual lookups, and recognized
+  writes that occur without route context.
+- Substring-based topic suggestions for near-miss lookup names.
+- Optional limited blocking for recognized new destinations when
+  `observeOnly` is explicitly disabled; existing project edits and opaque
+  shell commands remain unblocked.
+
+### Changed
+- Startup logs are debug-gated; warnings use stderr.
+- Plugin manifest declares startup activation and the `context_lookup` tool
+  contract explicitly.
+
+### Fixed
+- Injection byte limits now cover the complete header, body, and truncation
+  note while preserving UTF-8 code-point boundaries.
+- The registered tool name is fixed to the manifest-owned `context_lookup`
+  contract; runtime name overrides are no longer accepted.
+- Auto-routing now skips topics without a default section instead of injecting
+  their entire reference file.
+- File-write governance now requires the `file-placement` topic specifically;
+  looking up an unrelated topic no longer suppresses telemetry or blocking.
+- Registered `context_lookup` through OpenClaw's per-run tool factory and now
+  return the required content-block result shape, preventing live tool calls
+  from failing in the Codex harness.
+- Manual lookups now bind to the active run through `after_tool_call`, matching
+  OpenClaw's real tool context contract.
+- Replaced restricted `agent_end` cleanup with a 128-run, 30-minute bounded
+  state cache, so the plugin needs no conversation-access permission.
+- Write governance now derives `write`/`edit` destinations from the real
+  `params.path` and `params.file_path` hook envelopes when host-derived paths
+  are unavailable.
+- Invalid or blank trigger and alias entries are ignored, preventing routing
+  hook failures, all-prompt injection, and false topic suggestions.
+
 ## [1.2.0] — 2026-04-19
 
 ### Added

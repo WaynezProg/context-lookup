@@ -1,19 +1,21 @@
 {
   "id": "context-lookup",
+  "activation": {
+    "onStartup": true
+  },
   "name": "Context Lookup",
-  "version": "1.2.0",
-  "description": "Registers a single function-call style tool `context_lookup` that lets agents fetch shared context, tool docs, and topic-indexed knowledge on demand. No auto-injection; agents query by topic name. Tool description is locale-aware (en/zh-TW) and stays short — agents call list_topics on demand.",
+  "version": "1.3.0",
+  "description": "Registers `context_lookup` for on-demand topic/section retrieval, plus optional trigger-based section routing and privacy-safe observe-only write telemetry.",
   "entry": "./index.js",
+  "contracts": {
+    "tools": ["context_lookup"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
       "topicsFile": {
         "type": "string",
         "description": "Path to the topic registry JSON file, relative to workspace root (or absolute). Defaults to 'topics.json'."
-      },
-      "toolName": {
-        "type": "string",
-        "description": "Override the registered tool name. Defaults to 'context_lookup'."
       },
       "maxBytes": {
         "type": "number",
@@ -32,6 +34,30 @@
       "workspaceRoot": {
         "type": "string",
         "description": "Absolute path to workspace root. Only needed if the host does not supply one via api.runtime.workspaceRoot or api.getWorkspaceRoot(). Falls back to ~/.openclaw/workspace (honors OPENCLAW_PROFILE) as last resort."
+      },
+      "routing": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable deterministic prompt-trigger routing and write telemetry. Defaults to false."
+          },
+          "observeOnly": {
+            "type": "boolean",
+            "description": "When true, record write-without-route events without blocking. When false, block recognized new destinations until context is loaded. Defaults to true."
+          },
+          "telemetryFile": {
+            "type": "string",
+            "description": "Optional JSONL telemetry path, relative to workspace root or absolute. Records no prompt text or full destination path."
+          },
+          "maxInjectedBytes": {
+            "type": "number",
+            "minimum": 256,
+            "maximum": 4096,
+            "description": "Maximum bytes injected from a matched topic's default section. Defaults to 2500."
+          }
+        },
+        "additionalProperties": false
       }
     },
     "additionalProperties": false

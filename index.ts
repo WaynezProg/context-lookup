@@ -3,9 +3,9 @@
  *
  * Registers a single tool `context_lookup` that lets agents fetch shared
  * context, tool documentation, or any topic-indexed knowledge file on
- * demand. There is no auto-injection: the agent must explicitly call the
- * tool with a `topic` name. Topic → file mapping lives in a JSON registry
- * outside `openclaw.json`.
+ * demand. Optional deterministic prompt triggers can inject only a topic's
+ * default section; they are disabled unless configured. Topic → file mapping
+ * lives in a JSON registry outside `openclaw.json`.
  *
  * Companion to (and replacement for) `progressive-context`'s on-demand
  * features. Bootstrap files (AGENTS/TOOLS/MEMORY/USER/IDENTITY/SOUL/
@@ -13,8 +13,8 @@
  * touch them.
  */
 
-import { readFileSync, existsSync, statSync } from "fs";
-import { isAbsolute, join } from "path";
+import { appendFileSync, mkdirSync, readFileSync, existsSync, statSync } from "fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +31,8 @@ interface TopicEntry {
   aliases?: string[];
   /** Optional category id (matches a key in registry.categories). */
   category?: string;
+  /** Literal prompt fragments that load this topic's default section. */
+  triggers?: string[];
 }
 
 interface CategoryMeta {
@@ -48,7 +50,6 @@ interface TopicRegistry {
 
 interface PluginConfig {
   topicsFile?: string;
-  toolName?: string;
   maxBytes?: number;
   skipAgents?: string[];
   /** Tool description language. "en" (default) or "zh-TW". */
@@ -58,6 +59,14 @@ interface PluginConfig {
    * provide one via `api.runtime.workspaceRoot` or `api.getWorkspaceRoot()`.
    */
   workspaceRoot?: string;
+  routing?: RoutingConfig;
+}
+
+interface RoutingConfig {
+  enabled?: boolean;
+  observeOnly?: boolean;
+  telemetryFile?: string;
+  maxInjectedBytes?: number;
 }
 
 interface ToolParams {
@@ -69,16 +78,38 @@ interface ToolParams {
 
 interface ToolContext {
   agentId?: string;
+  workspaceDir?: string;
   [key: string]: unknown;
 }
 
+interface AgentToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+}
+
+type RoutingEvent = {
+  ts: string;
+  event: "auto_route" | "lookup" | "write_without_route";
+  agentId: string;
+  runId: string | null;
+  topic: string | null;
+  toolName: string | null;
+  destinationClass: string | null;
+};
+
 interface OpenClawApi {
-  registerTool(def: {
+  registerTool(def: ((ctx: ToolContext) => {
     name: string;
+    label: string;
     description: string;
     parameters: Record<string, unknown>;
-    execute: (params: unknown, ctx: unknown) => Promise<unknown>;
-  }): void;
+    execute: (toolCallId: string, params: unknown) => Promise<AgentToolResult>;
+  }), options?: { name?: string }): void;
+  on?(
+    name: "before_prompt_build" | "before_tool_call" | "after_tool_call",
+    handler: (event: unknown, ctx: unknown) => unknown,
+    options?: { priority?: number },
+  ): void;
   getWorkspaceRoot?(): string;
   getConfig?(): PluginConfig;
 }
@@ -90,6 +121,9 @@ interface OpenClawApi {
 const DEFAULT_TOPICS_FILE = "topics.json";
 const DEFAULT_TOOL_NAME = "context_lookup";
 const DEFAULT_MAX_BYTES = 64_000;
+const WRITE_TOOLS = new Set(["write", "edit", "apply_patch"]);
+const MAX_ROUTED_RUNS = 128;
+const ROUTED_RUN_TTL_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,20 +176,35 @@ function listHeadings(content: string): string[] {
   return content.match(/^#{1,6} .+$/gm) ?? [];
 }
 
+function sliceUtf8(buffer: Buffer, maxBytes: number): string {
+  let end = Math.min(maxBytes, buffer.byteLength);
+  while (end > 0 && end < buffer.byteLength && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString("utf-8");
+}
+
 function truncate(content: string, maxBytes: number): { text: string; truncated: boolean } {
   const buf = Buffer.from(content, "utf-8");
   if (buf.byteLength <= maxBytes) return { text: content, truncated: false };
-  const sliced = buf.subarray(0, maxBytes).toString("utf-8");
-  const note = `\n\n…[truncated: original ${buf.byteLength} bytes, returned ${maxBytes}]`;
-  return { text: sliced + note, truncated: true };
+  const note = `\n\n…[truncated: original ${buf.byteLength} bytes]`;
+  const noteBytes = Buffer.byteLength(note, "utf-8");
+  if (noteBytes >= maxBytes) return { text: sliceUtf8(buf, maxBytes), truncated: true };
+  return {
+    text: sliceUtf8(buf, maxBytes - noteBytes) + note,
+    truncated: true,
+  };
+}
+
+function pluginDebugEnabled(): boolean {
+  const value = process.env.OPENCLAW_PLUGIN_DEBUG || process.env.OPENCLAW_DEBUG_PLUGINS || "";
+  return /^(1|true|yes)$/i.test(value);
 }
 
 function log(msg: string): void {
-  console.log(`[context-lookup] ${msg}`);
+  if (pluginDebugEnabled()) console.error(`[context-lookup] ${msg}`);
 }
 
 function warn(msg: string): void {
-  console.log(`[context-lookup] WARN: ${msg}`);
+  console.warn(`[context-lookup] WARN: ${msg}`);
 }
 
 /**
@@ -221,10 +270,22 @@ function loadRegistry(workspaceRoot: string, topicsFile: string): ResolvedRegist
       warn(`topic "${name}" missing required "file" — skipped`);
       continue;
     }
-    byName.set(name, entry);
-    if (Array.isArray(entry.aliases)) {
-      for (const alias of entry.aliases) {
-        if (typeof alias !== "string") continue;
+    const normalizedEntry: TopicEntry = {
+      ...entry,
+      aliases: Array.isArray(entry.aliases)
+        ? entry.aliases.filter(
+            (alias): alias is string => typeof alias === "string" && alias.trim().length > 0,
+          )
+        : [],
+      triggers: Array.isArray(entry.triggers)
+        ? entry.triggers.filter(
+            (trigger): trigger is string => typeof trigger === "string" && trigger.trim().length > 0,
+          )
+        : [],
+    };
+    byName.set(name, normalizedEntry);
+    if (Array.isArray(normalizedEntry.aliases)) {
+      for (const alias of normalizedEntry.aliases) {
         if (aliasIndex.has(alias) || byName.has(alias)) {
           warn(`alias "${alias}" of "${name}" collides with existing topic/alias — skipped`);
           continue;
@@ -251,6 +312,75 @@ function resolveTopic(reg: ResolvedRegistry, query: string): { name: string; ent
     if (entry) return { name: aliased, entry };
   }
   return null;
+}
+
+function normalizeLookupKey(value: string): string {
+  return value.trim().toLocaleLowerCase("en-US").replace(/[\s_]+/g, "-");
+}
+
+function suggestTopics(query: string, registry: ResolvedRegistry): string[] {
+  const needle = normalizeLookupKey(query);
+  if (!needle) return [];
+  return registry.names
+    .map((name) => ({
+      name,
+      keys: [name, ...(registry.byName.get(name)?.aliases ?? [])],
+    }))
+    .filter(({ keys }) => keys.some((key) => {
+      const normalized = normalizeLookupKey(key);
+      return normalized.includes(needle) || needle.includes(normalized);
+    }))
+    .map(({ name }) => name)
+    .slice(0, 3);
+}
+
+function matchAutoRoute(
+  prompt: string,
+  registry: ResolvedRegistry,
+): { name: string; entry: TopicEntry } | null {
+  const normalizedPrompt = prompt.toLocaleLowerCase("en-US");
+  if (!normalizedPrompt.trim()) return null;
+  for (const name of registry.names) {
+    const entry = registry.byName.get(name);
+    if (!entry || !Array.isArray(entry.triggers)) continue;
+    const matched = entry.triggers.some((trigger) =>
+      normalizedPrompt.includes(trigger.toLocaleLowerCase("en-US"))
+    );
+    if (matched) return { name, entry };
+  }
+  return null;
+}
+
+function timestampSeconds(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function classifyDestination(filePath: string | undefined, workspaceRoot: string): string {
+  if (!filePath || !isAbsolute(filePath)) return "unknown";
+  const target = resolve(filePath);
+  const workspace = resolve(workspaceRoot);
+  const workspaceRel = relative(workspace, target);
+  if (workspaceRel === "") return "workspace-root";
+  if (!workspaceRel.startsWith(`..${sep}`) && workspaceRel !== ".." && !isAbsolute(workspaceRel)) {
+    const first = workspaceRel.split(sep)[0];
+    if (first === "outputs") return "outputs";
+    if (first === "archive") return "archive";
+    if (first === "projects") return "project";
+    if (first === "agents") return "agent-workspace";
+    if (first === "tmp") return "tmp";
+    return "workspace-root";
+  }
+  const openClawRoot = dirname(workspace);
+  const openClawRel = relative(openClawRoot, target);
+  if (!openClawRel.startsWith(`..${sep}`) && openClawRel !== ".." && !isAbsolute(openClawRel)) {
+    if (openClawRel.split(sep)[0] === "tmp") return "tmp";
+  }
+  return "external";
+}
+
+function normalizeDestinationPath(value: unknown, workspaceRoot: string): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return resolve(workspaceRoot, value.trim());
 }
 
 type Locale = "en" | "zh-TW";
@@ -335,15 +465,66 @@ export default function register(api: OpenClawApi): void {
   }
 
   const topicsFile = config.topicsFile ?? DEFAULT_TOPICS_FILE;
-  const toolName = config.toolName ?? DEFAULT_TOOL_NAME;
+  const toolName = DEFAULT_TOOL_NAME;
   const maxBytes = typeof config.maxBytes === "number" && config.maxBytes > 0 ? config.maxBytes : DEFAULT_MAX_BYTES;
   const skipAgents = new Set(config.skipAgents ?? []);
   const locale: Locale = config.locale === "zh-TW" ? "zh-TW" : "en";
+  const routing = config.routing;
+  const routingEnabled = routing?.enabled === true;
+  const observeOnly = routing?.observeOnly !== false;
+  const maxInjectedBytes =
+    typeof routing?.maxInjectedBytes === "number" && routing.maxInjectedBytes > 0
+      ? routing.maxInjectedBytes
+      : 2500;
 
   const registry = loadRegistry(workspaceRoot, topicsFile);
+  const routedRuns = new Map<string, { topics: Set<string>; touchedAt: number }>();
+  const telemetryPath = typeof routing?.telemetryFile === "string" && routing.telemetryFile.trim()
+    ? (isAbsolute(routing.telemetryFile) ? routing.telemetryFile : join(workspaceRoot, routing.telemetryFile))
+    : null;
+
+  const pruneRoutedRuns = (now: number): void => {
+    for (const [runId, state] of routedRuns) {
+      if (now - state.touchedAt > ROUTED_RUN_TTL_MS) routedRuns.delete(runId);
+    }
+  };
+  const markRouted = (runId: string | undefined, topic: string): void => {
+    if (!runId) return;
+    const now = Date.now();
+    pruneRoutedRuns(now);
+    const existing = routedRuns.get(runId);
+    if (existing) {
+      existing.topics.add(topic);
+      existing.touchedAt = now;
+      routedRuns.delete(runId);
+      routedRuns.set(runId, existing);
+      return;
+    }
+    while (routedRuns.size >= MAX_ROUTED_RUNS) {
+      const oldest = routedRuns.keys().next().value as string | undefined;
+      if (!oldest) break;
+      routedRuns.delete(oldest);
+    }
+    routedRuns.set(runId, { topics: new Set([topic]), touchedAt: now });
+  };
+  const hasRouted = (runId: string | undefined, topic: string): boolean => {
+    if (!runId) return false;
+    pruneRoutedRuns(Date.now());
+    return routedRuns.get(runId)?.topics.has(topic) === true;
+  };
+  const recordRoutingEvent = (event: RoutingEvent): void => {
+    if (!telemetryPath) return;
+    try {
+      mkdirSync(dirname(telemetryPath), { recursive: true });
+      appendFileSync(telemetryPath, `${JSON.stringify(event)}\n`, "utf-8");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warn(`failed to append routing telemetry: ${message}`);
+    }
+  };
 
   log(
-    `v1.2 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}`,
+    `v1.3 init: workspaceRoot=${workspaceRoot}, topicsFile=${registry.sourcePath}, topics=${registry.names.length}, tool=${toolName}, locale=${locale}, routing=${routingEnabled ? "enabled" : "disabled"}`,
   );
 
   if (typeof api.registerTool !== "function") {
@@ -351,7 +532,7 @@ export default function register(api: OpenClawApi): void {
     return;
   }
 
-  api.registerTool({
+  const lookupTool = {
     name: toolName,
     description: buildToolDescription(registry, toolName, locale),
     parameters: {
@@ -423,8 +604,10 @@ export default function register(api: OpenClawApi): void {
 
       const resolved = resolveTopic(registry, p.topic);
       if (!resolved) {
+        const suggestions = suggestTopics(p.topic, registry);
+        const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
         return {
-          error: `Unknown topic '${p.topic}'. Available: ${registry.names.join(", ") || "(none)"}`,
+          error: `Unknown topic '${p.topic}'.${hint} Available: ${registry.names.join(", ") || "(none)"}`,
         };
       }
 
@@ -458,7 +641,135 @@ export default function register(api: OpenClawApi): void {
       if (truncated) result.truncated = true;
       return result;
     },
-  });
+  };
+
+  api.registerTool((toolCtx: ToolContext) => ({
+    name: lookupTool.name,
+    label: "Context Lookup",
+    description: lookupTool.description,
+    parameters: lookupTool.parameters,
+    execute: async (_toolCallId: string, params: unknown): Promise<AgentToolResult> => {
+      const details = await lookupTool.execute(params, toolCtx) as Record<string, unknown>;
+      return {
+        content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+        details,
+      };
+    },
+  }), { name: DEFAULT_TOOL_NAME });
+
+  if (routingEnabled && typeof api.on === "function") {
+    api.on(
+      "before_prompt_build",
+      (event: unknown, ctx: unknown) => {
+        const ev = event as { prompt?: unknown };
+        const cx = ctx as { agentId?: string; runId?: string };
+        if (!cx.agentId || skipAgents.has(cx.agentId)) return;
+        if (typeof ev.prompt !== "string") return;
+        const matched = matchAutoRoute(ev.prompt, registry);
+        if (!matched) return;
+        const filePath = isAbsolute(matched.entry.file)
+          ? matched.entry.file
+          : join(workspaceRoot, matched.entry.file);
+        const content = readFileCached(filePath);
+        if (content === null) return;
+        const section = matched.entry.section;
+        if (!section?.trim()) return;
+        const body = extractSection(content, section);
+        if (!body) return;
+        markRouted(cx.runId, matched.name);
+        recordRoutingEvent({
+          ts: timestampSeconds(),
+          event: "auto_route",
+          agentId: cx.agentId,
+          runId: cx.runId ?? null,
+          topic: matched.name,
+          toolName: null,
+          destinationClass: null,
+        });
+        const header = `[On-demand context: ${matched.name}/${section}]`;
+        const { text } = truncate(`${header}\n${body}`, maxInjectedBytes);
+        return { appendContext: text };
+      },
+      { priority: 20 },
+    );
+    api.on("after_tool_call", (event: unknown, ctx: unknown) => {
+      const ev = event as {
+        toolName?: string;
+        params?: Record<string, unknown>;
+        result?: unknown;
+        error?: string;
+      };
+      if (ev.toolName !== toolName || ev.error) return;
+      const params = ev.params ?? {};
+      if (params.list_topics === true || params.list_sections === true) return;
+      if (typeof params.topic !== "string") return;
+      const result = ev.result as {
+        error?: unknown;
+        details?: { error?: unknown };
+      } | undefined;
+      if (typeof result?.error === "string" || typeof result?.details?.error === "string") return;
+      const resolved = resolveTopic(registry, params.topic);
+      if (!resolved) return;
+      const cx = ctx as { agentId?: string; runId?: string };
+      const agentId = cx.agentId ?? "unknown";
+      if (skipAgents.has(agentId)) return;
+      markRouted(cx.runId, resolved.name);
+      recordRoutingEvent({
+        ts: timestampSeconds(),
+        event: "lookup",
+        agentId,
+        runId: cx.runId ?? null,
+        topic: resolved.name,
+        toolName,
+        destinationClass: null,
+      });
+    });
+    api.on("before_tool_call", (event: unknown, ctx: unknown) => {
+      const ev = event as {
+        toolName?: string;
+        params?: Record<string, unknown>;
+        derivedPaths?: readonly string[];
+      };
+      const cx = ctx as {
+        agentId?: string;
+        runId?: string;
+        toolName?: string;
+        workspaceDir?: string;
+      };
+      const agentId = cx.agentId ?? "unknown";
+      if (skipAgents.has(agentId)) return;
+      const toolName = ev.toolName ?? cx.toolName ?? "unknown";
+      if (!WRITE_TOOLS.has(toolName)) return;
+      if (hasRouted(cx.runId, "file-placement")) return;
+      const agentWorkspaceRoot = normalizeDestinationPath(cx.workspaceDir, workspaceRoot) ?? workspaceRoot;
+      const paramPath = normalizeDestinationPath(
+        ev.params?.path ?? ev.params?.file_path,
+        agentWorkspaceRoot,
+      );
+      const derivedPaths = ev.derivedPaths?.length
+        ? ev.derivedPaths
+        : (paramPath ? [paramPath] : []);
+      const existingRepoEdit = derivedPaths.length > 0 && derivedPaths.every((filePath) =>
+        existsSync(filePath) && classifyDestination(filePath, agentWorkspaceRoot) === "project"
+      );
+      if (existingRepoEdit) return;
+      const destinationClass = classifyDestination(derivedPaths[0], agentWorkspaceRoot);
+      recordRoutingEvent({
+        ts: timestampSeconds(),
+        event: "write_without_route",
+        agentId,
+        runId: cx.runId ?? null,
+        topic: null,
+        toolName,
+        destinationClass,
+      });
+      if (observeOnly || destinationClass === "unknown") return;
+      return {
+        block: true,
+        blockReason: "File-placement context was not loaded for this new destination. Call context_lookup({topic:\"file-placement\"}) and retry.",
+      };
+    });
+  }
 
   log(`tool '${toolName}' registered (${registry.names.length} topics)`);
 }
